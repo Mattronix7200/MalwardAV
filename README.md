@@ -14,6 +14,7 @@ Program Malward to darmowy skaner antywirusowy tzw. drugiej opinii — działa o
 ### Ważne informacje o produkcie
 Program posiada mechanizmy osłon w czasie rzeczywistym, które można włączyć. Jednakże, osłony te nie są skorelowane z głębszą integracją w systemie, tzw: **sterownik jądra**, dzięki któremu, program miałby bezpośredni dostęp do blokowania zagrożeń w czasie rzeczywistym. Program używa wszystkich dostępnych w systemie metod, które pozwolą zachować możliwie jak najlepsze bezpieczeństwo, choć nie gwarantuje ona pełnej ochrony. Najlepiej korzystać z programu, w połączeniu z innym pakietem zabezpieczającym, np: programem antywirusowym Windows Defender. System analizy w chmurze wykorzystuje skanowanie pliku wysyłanego do naszego serwera analizy, który wykorzystując cztery silniki skanujące- zwiększają pokrycie i detekcję. Przesyłany plik jest analizowany i natychmiastowo usuwany po wykonanej analizie. Dostępna jest wersja programu nie zawierającego mechanizmu osłon, oraz dodatkowych narzędzi, umożliwiając tylko skanowanie na żądanie.
 
+
 ## 
 
 <img width="1056" height="596" alt="app" src="https://github.com/user-attachments/assets/a38a8d46-ccf1-4343-8517-d8b2a4a4f80c" />
@@ -86,6 +87,13 @@ Oprogramowanie jest dostarczane „takie, jakie jest" (AS IS), bez jakiejkolwiek
 ## Pobierz
 
 https://github.com/Mattronix7200/MalwardAV/releases/tag/pre-final
+
+## Zrzuty ekranu
+
+<img width="1918" height="920" alt="scn4" src="https://github.com/user-attachments/assets/e950c4fd-e067-4279-9a70-0798d4e7a92b" />
+<img width="1918" height="920" alt="scn6" src="https://github.com/user-attachments/assets/749ace1c-372c-4564-8c1a-bbecc0dc5a80" />
+<img width="1918" height="920" alt="scn7" src="https://github.com/user-attachments/assets/ce00a243-2703-4f82-aa69-6805dcc47576" />
+<img width="1918" height="920" alt="scn13" src="https://github.com/user-attachments/assets/3226df67-ef64-4f31-8304-6b30e27b308c" />
 
 
 ---
