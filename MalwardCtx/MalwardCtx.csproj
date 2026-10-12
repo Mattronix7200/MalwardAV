@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- MalwardCtx.exe — NIEPODNIESIONY (asInvoker) forwarder menu kontekstowego.
+       Klasyczny werb %1 uruchamia po jednym MalwardCtx na zaznaczony element BEZ UAC
+       (bo asInvoker). Każdy dopisuje ścieżkę do scan-request.txt; jeden (właściciel
+       mutexa) uruchamia malward.exe RAZ (jedno podniesienie UAC) — chyba że Malward już
+       działa (0 UAC). Publikowany jako self-contained z luznymi DLL (obok malward.exe). -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>            <!-- brak okna konsoli -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>MalwardCtx</AssemblyName>
+    <RootNamespace>MalwardCtx</RootNamespace>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SelfContained>true</SelfContained>
+  </PropertyGroup>
+
+</Project>

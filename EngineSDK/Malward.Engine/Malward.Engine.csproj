@@ -1,0 +1,91 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Numer wersji: Directory.Build.props w katalogu glownym -->
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>malscan</AssemblyName>
+    <RootNamespace>Malward.Engine</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <!-- Kompilacja normalna: self-contained z luznymi DLL (bez single-file). -->
+    <SelfContained>true</SelfContained>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+
+    <!-- Branding (winexe metadata) -->
+    <AssemblyTitle>Malward(R) Virus Scanner</AssemblyTitle>
+    <Product>Malward Virus Scanner</Product>
+    <Company>jmSOFT</Company>
+    <Authors>Community Edition</Authors>
+    <Copyright>Copyright (c) 2026 jmSOFT</Copyright>
+    <Description>Malward(R) Virus Scanner — modular antivirus engine</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <!-- Microsoft.Win32.Registry — używane w Memory/AutostartScanner.cs do
+         enumeracji kluczy Run/RunOnce/Winlogon/IFEO przy memory scan. -->
+    <PackageReference Include="Microsoft.Win32.Registry" Version="5.0.0" />
+    <!-- DPAPI — the cloud session token is cached between runs (Cloud/SessionCache.cs) and a
+         bearer token must not sit on disk in the clear. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- One implementation of the quarantine container, shared by linking so the
+         writer and every reader cannot drift apart. -->
+    <Compile Include="..\..\ResidentShieldSDK\QuarantineCrypto.cs" Link="Quarantine\QuarantineCrypto.cs" />
+  </ItemGroup>
+
+  <!-- The YARA heuristic scanner is embedded into the engine assembly instead of shipped as a
+       loose heurscanner.exe. At runtime EmbeddedHeurScanner extracts it once to
+       %ProgramData%\Malward\engine and runs it from there, so the deployment carries one fewer
+       loose binary.
+
+       It is embedded COMPRESSED, and that is not an optimisation. A managed DLL carrying a whole
+       PE image in its resource section is the shape a dropper has, and Defender's ML model scores
+       it as Trojan:Win32/Wacatac.B!ml - measured: the same build is flagged with the raw exe
+       embedded and clean with the gzipped one, while neither file is flagged on its own. The
+       archive is produced here from the prebuilt exe, never kept in the tree, so it can never go
+       stale against the binary it came from. -->
+  <UsingTask TaskName="GzipFile" TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Source ParameterType="System.String" Required="true" />
+      <Destination ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.IO.Compression" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        Directory.CreateDirectory(Path.GetDirectoryName(Destination));
+        using (var src = File.OpenRead(Source))
+        using (var dst = File.Create(Destination))
+        using (var gz = new GZipStream(dst, CompressionLevel.Optimal))
+            src.CopyTo(gz);
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="PackHeurScanner" BeforeTargets="PrepareForBuild"
+          Condition="Exists('..\bin\heurscanner.exe')"
+          Inputs="..\bin\heurscanner.exe" Outputs="$(IntermediateOutputPath)heurscanner.exe.gz">
+    <GzipFile Source="..\bin\heurscanner.exe"
+              Destination="$(IntermediateOutputPath)heurscanner.exe.gz" />
+  </Target>
+
+  <Target Name="AddHeurScannerResource" BeforeTargets="PrepareForBuild" DependsOnTargets="PackHeurScanner"
+          Condition="Exists('..\bin\heurscanner.exe')">
+    <ItemGroup>
+      <EmbeddedResource Include="$(IntermediateOutputPath)heurscanner.exe.gz">
+        <LogicalName>heurscanner.exe.gz</LogicalName>
+      </EmbeddedResource>
+    </ItemGroup>
+  </Target>
+</Project>

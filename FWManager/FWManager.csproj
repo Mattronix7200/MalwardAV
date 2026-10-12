@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Malward.FWManager</RootNamespace>
+    <AssemblyName>Malward.FWManager</AssemblyName>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- EventLogWatcher / EventLogQuery z System.Diagnostics.Eventing.Reader.
+         Na .NET 8 nie jest częścią BCL — trzeba dodać paczkę.
+         Używane przez FirewallEventListener do nasłuchu Security Event 5157. -->
+    <PackageReference Include="System.Diagnostics.EventLog" Version="8.0.0" />
+    <!-- System.Drawing.Icon.ExtractAssociatedIcon + Bitmap dla ikon aplikacji
+         w tabeli aktywnych połączeń (AppIconCache). -->
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+    <!-- ServiceController do enumeracji usług Windows w nowej zakładce „Usługi". -->
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>
