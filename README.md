@@ -44,6 +44,28 @@ szczegółów tego protokołu zniosłoby całą warstwę ochronną, dlatego ich 
 kod programu można wyświetlić, budować i modyfikować, ale pełna funkcjonalność będzie dostępna 
 tylko po zainstalowaniu programu z poziomu instalatora i wymaga dostępu udzielonego przez autora.
 
+## Kompilacja
+
+```bat
+dotnet build EngineSDK\Malward.Engine\Malward.Engine.csproj -c Release
+dotnet build AppGUI\Malward.AppGUI\Malward.AppGUI.csproj -c Release
+```
+
+Ważne: Kompilacja wymaga plików zasobów, które nie zostały załączone w tym repozytorium!
+
+Pominięte są:
+
+- **`config.vdeb`** — klucz autoryzacji klienta. Bez niego program nie wystartuje; trzeba
+  dostarczyć własny.
+- **`client-auth.json`, `server-auth.json`, `api-keys.json`** — klucze API usług
+  zewnętrznych.
+- **Usługa serwerowa (VPS)** — budowanie baz, endpointy aktualizacji i chmura skanująca nie są
+  publikowane. Repozytorium zawiera klienta.
+- **Bazy sygnatur (`*.vdeb`)** — ze względu na rozmiar (ok. 700 MB) nie znajdują się tutaj.
+
+W efekcie kod można czytać, budować i modyfikować, ale pełna funkcjonalność chmurowa
+wymaga dostępu udzielonego przez autora.
+
 ## Licencja
 
 Zezwala się na bezpłatny wgląd, pobieranie oraz modyfikowanie niniejszego kodu źródłowego
@@ -102,6 +124,29 @@ The program features real-time protection mechanisms that can be enabled. Howeve
 
 Some files have been **intentionally omitted** for the security of the code and the product itself.
 The program uses a **custom authorization system** between the client and the server: the client does not communicate with the cloud "anonymously," but authenticates every call. Publishing the key material or the details of this protocol would remove the entire protective layer, which is why you will not find them here. As a result, the program's code can be viewed, built, and modified, but full functionality will only be available after installing the program via the installer and requires authorization granted by the author.
+
+### Building from source
+
+```bat
+dotnet build EngineSDK\Malward.Engine\Malward.Engine.csproj -c Release
+dotnet build AppGUI\Malward.AppGUI\Malward.AppGUI.csproj -c Release
+```
+
+Warning: Resource files are required to run the compiler. These files are not included in this repository.
+
+Withheld:
+
+- **`config.vdeb`** — the client authorisation key. The program will not start without it; 
+- **`client-auth.json`, `server-auth.json`, `api-keys.json`** — third-party API keys.
+- **The server (VPS) side** — database building, update endpoints and the cloud scanner are not
+  published. This repository contains the client.
+- **Signature databases (`*.vdeb`)** — because of their size (about 700 MB) they are not stored
+  in the repository; 
+- **The signing certificate** and the details of the signing procedure.
+
+In practice: the code can be read, built and modified, but full cloud functionality requires your
+own backend or access granted by the author.
+
 
 ## License
 
