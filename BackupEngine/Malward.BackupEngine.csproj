@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <!-- Numer wersji: Directory.Build.props w katalogu glownym -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Malward.BackupEngine</RootNamespace>
+    <AssemblyName>bkmonitor</AssemblyName>
+    <OutputType>Exe</OutputType>
+    <!-- Kompilacja normalna: self-contained z luznymi DLL (bez single-file). -->
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\Extras\icon.ico</ApplicationIcon>
+
+    <!-- ─── Metadane pliku EXE ─────────────────────────────────────────────── -->
+    <AssemblyTitle>Malward(R) Backup Engine</AssemblyTitle>
+    <Product>Malward</Product>
+    <Company>Malward</Company>
+    <Authors>Jakub Michalski</Authors>
+    <Copyright>Copyright (C) Jakub Michalski</Copyright>
+    <Description>Malward(R) Backup Engine — anty-ransomware silnik kopii zapasowych (BKF format, ZSTD + AES-256-GCM).</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Worker service template -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.0" />
+    <!-- ZstdSharp WYCOFANY: zżerał 4 GB RAM (windowSize). Zastąpiony
+         System.IO.Compression.DeflateStream (built-in .NET, streaming, ~256 KB peak). -->
+    <!-- DPAPI wrapper (LocalMachine scope dla master key) -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+</Project>

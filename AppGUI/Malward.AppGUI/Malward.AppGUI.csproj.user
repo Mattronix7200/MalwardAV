@@ -1,0 +1,33 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup />
+  <ItemGroup>
+    <Compile Update="ActionPopupForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="AlertForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="FirewallAlertForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="FirewallPopupForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="HipsAlertForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="NetworkAlertForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="RichInfoPopupForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="ScanProgressForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="TrayMenuForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+  </ItemGroup>
+</Project>
