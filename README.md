@@ -23,6 +23,7 @@ Program posiada mechanizmy osłon w czasie rzeczywistym, które można włączy�
 - [Wymagania systemowe](#wymagania-systemowe)
 - [Repozytorium](#repozytorium)
 - [Licencja](#licencja)
+- [Pobieranie](#pobierz)
 - [English version](#english-version)
 
 ## Wymagania systemowe
@@ -82,6 +83,11 @@ wyłącznie do celów prywatnych, edukacyjnych i niekomercyjnych.
 
 Oprogramowanie jest dostarczane „takie, jakie jest" (AS IS), bez jakiejkolwiek gwarancji.
 
+## Pobierz
+
+https://github.com/Mattronix7200/MalwardAV/releases/tag/pre-final
+
+
 ---
 
 <details>
@@ -108,6 +114,7 @@ The program features real-time protection mechanisms that can be enabled. Howeve
 - [System Requirements](#system-requirements)
 - [Repository](#repository)
 - [License](#license)
+- [Download](#download)
 - [Polish version](#polish-version)
 
 ## System Requirements
@@ -159,5 +166,9 @@ Free viewing, downloading, and modification of this source code is permitted exc
 3. Any modified versions shared publicly must include a notice acknowledging the original author and must be distributed under this license.
 
 The software is provided "AS IS", without any warranty of any kind.
+
+## Download
+
+https://github.com/Mattronix7200/MalwardAV/releases/tag/pre-final
 
 </details>
