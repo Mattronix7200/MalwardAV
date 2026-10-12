@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Numer wersji: Directory.Build.props w katalogu glownym -->
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>netmonitor</AssemblyName>
+    <RootNamespace>Malward.NetworkScanner</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Kompilacja normalna: self-contained z luznymi DLL (bez single-file). -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\Extras\icon.ico</ApplicationIcon>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <AssemblyTitle>Malward(R) Network Scanner</AssemblyTitle>
+    <Product>Malward</Product>
+    <Company>Malward</Company>
+    <Authors>Jakub Michalski</Authors>
+    <Copyright>Copyright (C) Jakub Michalski</Copyright>
+    <Description>Malward(R) Network Scanner — ochrona sieciowa (DNS proxy + filtr URL).</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Linked so a connection's image is scanned inside this process rather than by starting
+         malscan.exe for every check. -->
+    <ProjectReference Include="..\EngineSDK\Malward.Engine\Malward.Engine.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
+    <!-- DPAPI dla zabezpieczenia klucza prywatnego roota Malward CA. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+
+  <!-- Logo Malward (icon-fixed.png) wbudowane jako EmbeddedResource — używane na
+       stronie blokady serwowanej przez BlockPageServer/TlsBlockServer (data: URI). -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\Extras\icon-fixed.png" Link="malward-logo.png"
+                      LogicalName="Malward.NetworkScanner.logo.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- One implementation of the configKey container, shared by linking rather than
+         copying crypto into three assemblies that would then drift apart. -->
+    <Compile Include="..\EngineSDK\Malward.Engine\Cloud\ConfigKeyFile.cs" Link="Cloud\ConfigKeyFile.cs" />
+  </ItemGroup>
+</Project>

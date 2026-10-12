@@ -1,0 +1,52 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Numer wersji: Directory.Build.props w katalogu glownym -->
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>mwshield</AssemblyName>
+    <RootNamespace>Malward.ResidentShield</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Kompilacja normalna: self-contained z luznymi DLL (bez single-file). -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\Extras\icon.ico</ApplicationIcon>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- ─── Metadane pliku EXE ─────────────────────────────────────────────── -->
+    <AssemblyTitle>Malward(R) Resident Shield</AssemblyTitle>
+    <Product>Malward</Product>
+    <Company>Malward</Company>
+    <Authors>Jakub Michalski</Authors>
+    <Copyright>Copyright (C) Jakub Michalski</Copyright>
+    <Description>Malward(R) Resident Shield — ochrona rezydentna w czasie rzeczywistym</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The scan engine is linked in, so the resident shield scans inside its own process instead
+         of launching malscan.exe once per file. That spawning is what showed up in Task Manager as
+         several extra Malward processes during real-time protection. -->
+    <ProjectReference Include="..\EngineSDK\Malward.Engine\Malward.Engine.csproj" />
+    <!-- The network shield is hosted inside this process too, so protection runs as one service
+         instead of two (resident + network), the way other suites do it. -->
+    <ProjectReference Include="..\NetworkScannerSDK\NetworkScanner.csproj" />
+    <!-- Kopia zapasowa hostowana w tej samej usludze: jeden proces ochrony zamiast trzech. -->
+    <ProjectReference Include="..\BackupEngine\Malward.BackupEngine.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- ETW kernel monitoring (Process, Registry, File events) -->
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.12" />
+    <!-- Embedded NoSQL DB for rollback log -->
+    <PackageReference Include="LiteDB" Version="5.0.21" />
+    <!-- WMI process-start monitoring (Win32_ProcessStartTrace) -->
+    <PackageReference Include="System.Management" Version="8.0.0" />
+    <!-- Hosting jako usługa Windows (SCM lifecycle) -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
+  </ItemGroup>
+
+</Project>
