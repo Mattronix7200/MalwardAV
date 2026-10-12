@@ -98,6 +98,12 @@ https://github.com/Mattronix7200/MalwardAV/releases/tag/pre-final
 > [!WARNING]  
 > **Ważna informacja:** PRZY PIERWSZYM URUCHOMIENIU program będzie wymagał pobrania około **700 MB** danych. Zapewnij stabilny dostęp do Internetu!
 
+> [!CAUTION]
+> **Wczesna wersja oprogramowania**
+> 
+> Program znajduje się we wczesnej fazie rozwoju (**Pre-final / Early Access**) i może zawierać błędy lub działać niestabilnie. Używasz go na własną odpowiedzialność. Jeśli napotkasz problem, zgłoś go w zakładce [Issues](../../issues).
+
+
 ## Zrzuty ekranu
 
 <img width="1918" height="920" alt="scn4" src="https://github.com/user-attachments/assets/e950c4fd-e067-4279-9a70-0798d4e7a92b" />
@@ -187,6 +193,8 @@ The software is provided "AS IS", without any warranty of any kind.
 
 ## Download
 
+App supports English language, so you can download it and test it, if you want :D
+
 https://github.com/Mattronix7200/MalwardAV/releases/tag/pre-final
 
 ### Installation Instructions:
@@ -197,5 +205,9 @@ https://github.com/Mattronix7200/MalwardAV/releases/tag/pre-final
 3. Run the program **as an administrator** so that it can function properly.
 
 > **Important Note:** UPON FIRST LAUNCH, the program will require downloading approximately **700 MB** of data. Make sure you have an active Internet connection!
+
+> **Early Access**
+> 
+> This software is in early development (**Pre-final / Early Access**) and may contain bugs or performance issues. Use it at your own risk. If you encounter any bugs, please report them in the [Issues](../../issues) section.
 
 </details>
