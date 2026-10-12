@@ -88,6 +88,16 @@ Oprogramowanie jest dostarczane „takie, jakie jest" (AS IS), bez jakiejkolwiek
 
 https://github.com/Mattronix7200/MalwardAV/releases/tag/pre-final
 
+### Instrukcja instalacji:
+
+1. Utwórz folder w ścieżce:  
+   `C:\Program Files\Malward`
+2. Utwórz skrót do aplikacji `C:\Program Files\Malward\Malward.exe`, aby móc wygodnie uruchamiać program.
+3. Uruchom program **jako administrator**, aby mógł działać prawidłowo.
+
+> [!WARNING]  
+> **Ważna informacja:** PRZY PIERWSZYM URUCHOMIENIU program będzie wymagał pobrania około **700 MB** danych. Zapewnij stabilny dostęp do Internetu!
+
 ## Zrzuty ekranu
 
 <img width="1918" height="920" alt="scn4" src="https://github.com/user-attachments/assets/e950c4fd-e067-4279-9a70-0798d4e7a92b" />
@@ -178,5 +188,14 @@ The software is provided "AS IS", without any warranty of any kind.
 ## Download
 
 https://github.com/Mattronix7200/MalwardAV/releases/tag/pre-final
+
+### Installation Instructions:
+
+1. Create a folder at:  
+   `C:\Program Files\Malward`
+2. Create a shortcut to the application `C:\Program Files\Malward\Malward.exe` to easily run the program.
+3. Run the program **as an administrator** so that it can function properly.
+
+> **Important Note:** UPON FIRST LAUNCH, the program will require downloading approximately **700 MB** of data. Make sure you have an active Internet connection!
 
 </details>
