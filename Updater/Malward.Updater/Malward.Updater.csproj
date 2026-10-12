@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Numer wersji: Directory.Build.props w katalogu glownym -->
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>mwupdate</AssemblyName>
+    <RootNamespace>Malward.Updater</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Ta sama ikona co program glowny: aktualizator pokazuje sie uzytkownikowi jako okno
+         i pozycja na pasku zadan, wiec bez ikony wyglada jak obcy proces. -->
+    <ApplicationIcon>..\..\Extras\icon.ico</ApplicationIcon>
+    <SelfContained>true</SelfContained>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <AssemblyTitle>Malward(R) Updater</AssemblyTitle>
+    <Company>jmSOFT</Company>
+    <Authors>Jakub Michalski</Authors>
+    <Description>Malward — instalator aktualizacji</Description>
+    <Product>Malward Updater</Product>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Zatrzymanie i uruchomienie uslug oraz odczyt uprawnien plikow: obie rzeczy sa
+         w osobnych pakietach, bo nie naleza do rdzenia .NET na innych systemach. -->
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.1" />
+    <PackageReference Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
+  </ItemGroup>
+
+</Project>
