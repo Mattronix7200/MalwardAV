@@ -1,5 +1,4 @@
-<img width="50%" height="50%" alt="logo" src="https://github.com/user-attachments/assets/ab0706d5-77be-4133-bc6d-2791f27f76ed" />
-
+<p align="center"><img width="70%" height="70%" alt="logo" src="https://github.com/user-attachments/assets/ab0706d5-77be-4133-bc6d-2791f27f76ed" /></p>
 
 #
 Malward is a free, second-opinion antivirus scanner — it runs alongside your primary security software to catch what might have slipped past it. You don't need to uninstall anything, as it is designed not to conflict with other security solutions. The program is lightweight and effective: the scanner engine utilizes local signature databases and cloud analysis, keeping system resource usage to a minimum while maximizing detection rates.
