@@ -9,7 +9,20 @@ public static class HipsSelfGuard
 
     private static readonly string[] OwnTaskNames = { "MalwardGuiAutostart" };
 
-    private const string OwnResolver = "127.0.0.1";
+    private static readonly string[] OwnResolvers = { "127.0.0.1", "::1", "0:0:0:0:0:0:0:1" };
+
+    private static bool IsOwnResolverList(string value)
+    {
+        if (value.Length == 0) return false;
+        foreach (var part in value.Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries))
+            if (!OwnResolvers.Contains(part.Trim(), StringComparer.OrdinalIgnoreCase)) return false;
+        return true;
+    }
+
+    private static readonly string[] DohPolicyValues =
+    {
+        "dnsoverhttpsmode", "builtindnsclientenabled", "enableautodoh",
+    };
 
     public static bool IsOwnProcessTree(int pid, int maxDepth = 6)
     {
@@ -38,7 +51,7 @@ public static class HipsSelfGuard
         if (OwnTaskNames.Any(t => c.Contains(t.ToLowerInvariant()))) return true;
 
         if (c.Contains("set-dnsclientserveraddress") &&
-            (c.Contains(OwnResolver) || c.Contains("-resetserveraddresses"))) return true;
+            (OwnResolvers.Any(r => c.Contains(r)) || c.Contains("-resetserveraddresses"))) return true;
 
         return false;
     }
@@ -51,13 +64,15 @@ public static class HipsSelfGuard
         var val = (value ?? "").Trim();
         var prev = (previousValue ?? "").Trim();
 
+        if (DohPolicyValues.Any(v => loc.EndsWith("|" + v, StringComparison.Ordinal))) return true;
+
         switch (ruleId)
         {
             case "reg.dns":
 
-                if (val == OwnResolver) return true;
+                if (IsOwnResolverList(val)) return true;
 
-                if (prev == OwnResolver) return true;
+                if (IsOwnResolverList(prev)) return true;
 
                 return false;
 

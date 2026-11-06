@@ -67,7 +67,7 @@ public sealed class ScanEngine : IDisposable
                 "detection disabled. Run `malscan update` to download it. " +
                 "Until then detection depends on the cloud (malscan).");
 
-        if (_config.TrustWhitelist && _whitelist.IsAvailable)
+        if (_whitelist.IsAvailable)
             Log.Info("ScanEngine", $"Whitelist: {_whitelist.ActivePath}");
     }
 
@@ -84,7 +84,7 @@ public sealed class ScanEngine : IDisposable
         if (Malward.Engine.Util.SystemFileCheck.IsGenuineSystemFile(filePath)) return true;
 
         if (SystemGuard.IsOwnComponent(filePath)) return true;
-        if (_config.TrustWhitelist && _whitelist.IsWhitelisted(md5, sha256)) return true;
+        if (_whitelist.IsWhitelisted(md5, sha256)) return true;
         return false;
     }
 
@@ -98,7 +98,7 @@ public sealed class ScanEngine : IDisposable
             if (ByodHit(h.Md5, h.Sha256) != null) return false;
             if (SystemGuard.IsProtectedPath(filePath)) return true;
             if (_vps.Lookup(h.Md5, h.Sha256) != null) return false;
-            if (_config.TrustWhitelist && _whitelist.IsWhitelisted(h.Md5, h.Sha256)) return true;
+            if (_whitelist.IsWhitelisted(h.Md5, h.Sha256)) return true;
             return false;
         }
         catch { return false; }
@@ -161,6 +161,17 @@ public sealed class ScanEngine : IDisposable
             Log.Debug("Reputation", $"File downloaded from the internet (MOTW): {Path.GetFileName(filePath)}");
 
         var result = await ScanInProcessAsync(filePath, sha256, ct);
+
+        if (result.Verdict == ScanVerdict.Threat && !_whitelist.IsAvailable)
+        {
+            Log.Warn("ScanEngine", $"{Path.GetFileName(filePath)} was flagged as "
+                                 + $"{result.ThreatName} but the whitelist database is not on disk yet "
+                                 + "— holding the verdict instead of acting on it, because the one "
+                                 + "database that could clear this file is missing.");
+            return new ScanResult(filePath, ScanVerdict.Unknown, null,
+                                  "deferred: no whitelist yet", sha256, md5);
+        }
+
         _verdictCache.Set(sha256, result);
 
         return result with { Md5 = md5 };
@@ -195,7 +206,7 @@ public sealed class ScanEngine : IDisposable
             }
             else if (rep != ProcRep.SystemTrusted)
             {
-                if (_config.TrustWhitelist && _whitelist.IsWhitelisted(hashes.Md5, hashes.Sha256))
+                if (_whitelist.IsWhitelisted(hashes.Md5, hashes.Sha256))
                     rep = ProcRep.Whitelisted;
                 else if (SystemGuard.HasValidSignature(filePath))
                     rep = ProcRep.Whitelisted;

@@ -34,13 +34,15 @@ public sealed class ModuleSupervisor : BackgroundService
         };
         _network  = new Slot("Network shield", CreateNetwork)
         {
-            SettingsPath = () => Malward.NetworkScanner.NetworkConfig.DefaultPath,
+            SettingsPath = () => ModuleBridge.NetworkInstalled ? ModuleBridge.NetworkConfigPath() : "",
 
             IgnoredKeys = new[] { "exclusions" },
+            ModuleFile = "netmonitor.dll",
         };
         _backup   = new Slot("Backup", CreateBackup)
         {
-            SettingsPath = () => Malward.BackupEngine.BackupConfig.DefaultConfigPath,
+            SettingsPath = () => ModuleBridge.BackupInstalled ? ModuleBridge.BackupConfigPath() : "",
+            ModuleFile = "bkmonitor.dll",
         };
 
         _slots = new[] { _resident, _network, _backup };
@@ -65,6 +67,11 @@ public sealed class ModuleSupervisor : BackgroundService
         public DateTime NextAttemptUtc = DateTime.MinValue;
 
         public Func<string>? SettingsPath;
+
+        /// <summary>Assembly this slot needs. Absent file means the user did not install the module.</summary>
+        public string? ModuleFile;
+
+        public bool ReportedMissing;
 
         public string[]? IgnoredKeys;
         public string StampApplied = "";
@@ -107,6 +114,8 @@ public sealed class ModuleSupervisor : BackgroundService
             await ApplyAsync(_network, want.Network, ct);
             await ApplyAsync(_backup, want.Backup, ct);
 
+            ClearNetworkPoliciesWhenModuleIsDown();
+
             foreach (var slot in _slots)
                 await ReloadOnSettingsChangeAsync(slot, ct);
         }
@@ -115,6 +124,19 @@ public sealed class ModuleSupervisor : BackgroundService
             _gate.Release();
             PublishState();
         }
+    }
+
+    private void ClearNetworkPoliciesWhenModuleIsDown()
+    {
+        if (_network.Running != null || !ModuleBridge.NetworkInstalled) return;
+        try
+        {
+            if (!ModuleBridge.NetworkPoliciesPending()) return;
+            Log.Warn("Modules", "The network shield is not running but its system policies are still "
+                              + "in place — removing them so browsing keeps working.");
+            ModuleBridge.ClearNetworkPolicies();
+        }
+        catch (Exception ex) { Log.Warn("Modules", $"Clearing the network policies reported: {ex.Message}"); }
     }
 
     private static string StatePath => Path.Combine(
@@ -158,6 +180,22 @@ public sealed class ModuleSupervisor : BackgroundService
         if (want && slot.Running == null)
         {
             if (_stopping) return;
+
+            // The factory cannot even be JIT-compiled without its assembly: the method body
+            // mentions types from netmonitor/bkmonitor, so entering it throws before any check
+            // inside could run. The decision therefore has to be made HERE, and a module the user
+            // chose not to install must not be retried every tick - it would only fill the log
+            // and keep the slot in a permanent failure state.
+            if (!ModulePresent(slot))
+            {
+                if (!slot.ReportedMissing)
+                {
+                    slot.ReportedMissing = true;
+                    Log.Info("Modules", $"{slot.Name}: module not installed ({slot.ModuleFile}) — skipped.");
+                }
+                return;
+            }
+
             if (DateTime.UtcNow < slot.NextAttemptUtc) return;
 
             IHostedService? instance = null;
@@ -201,6 +239,7 @@ public sealed class ModuleSupervisor : BackgroundService
     private async Task ReloadOnSettingsChangeAsync(Slot slot, CancellationToken ct)
     {
         if (slot.SettingsPath == null) return;
+        if (!ModulePresent(slot)) return;
 
         string stamp = StampOf(slot);
 
@@ -242,6 +281,17 @@ public sealed class ModuleSupervisor : BackgroundService
         }
 
         slot.StampSeen = stamp;
+    }
+
+    private static bool ModulePresent(Slot slot)
+    {
+        if (string.IsNullOrEmpty(slot.ModuleFile)) return true;
+        try
+        {
+            var dir = AppContext.BaseDirectory;
+            return File.Exists(Path.Combine(dir, slot.ModuleFile));
+        }
+        catch { return false; }
     }
 
     private static string StampOf(Slot slot)

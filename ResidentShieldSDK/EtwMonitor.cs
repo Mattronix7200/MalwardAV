@@ -247,6 +247,12 @@ public sealed class EtwMonitor : IDisposable
         RegistryWriters.Note(area, pid, image);
     }
 
+    private static bool MayCreateFile(FileIOCreateTraceData data)
+    {
+        try { return data.CreateDisposition != CreateDisposition.OPEN_EXISTING; }
+        catch { return true; }
+    }
+
     private void OnFileCreate(FileIOCreateTraceData data)
     {
         if (!_config.ProcessMonitorEnabled) return;
@@ -259,7 +265,8 @@ public sealed class EtwMonitor : IDisposable
         string path = ResolveDevicePath(raw);
         if (string.IsNullOrEmpty(path)) return;
 
-        _tracker.RecordFileOp(data.ProcessID, ChangeKind.FileCreate, path);
+        if (MayCreateFile(data))
+            _tracker.RecordFileOp(data.ProcessID, ChangeKind.FileCreate, path);
 
         if (path.Contains(@"\System32\Tasks\", StringComparison.OrdinalIgnoreCase))
         {

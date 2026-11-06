@@ -312,37 +312,44 @@ public sealed class HipsRegistryWatcher : IDisposable
         try { return Convert.FromHexString(s); } catch { return null; }
     }
 
-    private enum FirewallAuthor
+    private enum ChangeAuthor
     {
         Unknown,
 
         Own,
 
-        FirewallService,
+        WindowsService,
 
         Other,
     }
 
-    private static FirewallAuthor FirewallPolicyAuthor()
+    private static ChangeAuthor PolicyAuthor(string area)
     {
-        var who = RegistryWriters.Recent(RegistryWriters.FirewallPolicy);
+        if (OwnChangeAnnounced(area)) return ChangeAuthor.Own;
+
+        var who = RegistryWriters.Recent(area);
         if (who != null)
         {
             var image = who.Value.Image;
             if (SystemGuard.IsOwnComponent(image) || HipsSelfGuard.IsOwnProcessTree(who.Value.Pid))
-                return FirewallAuthor.Own;
-            if (IsServiceHost(image)) return FirewallAuthor.FirewallService;
-            return FirewallAuthor.Other;
+                return ChangeAuthor.Own;
+            if (IsWindowsConfigTool(image)) return ChangeAuthor.WindowsService;
+            return ChangeAuthor.Other;
         }
 
-        return OwnFirewallChangeAnnounced() ? FirewallAuthor.Own : FirewallAuthor.Unknown;
+        return ChangeAuthor.Unknown;
     }
 
-    private static bool IsServiceHost(string? image)
+    private static readonly string[] WindowsConfigTools =
+    {
+        "svchost.exe", "systemsettings.exe", "rundll32.exe", "mmc.exe",
+    };
+
+    private static bool IsWindowsConfigTool(string? image)
     {
         if (string.IsNullOrEmpty(image)) return false;
         var name = Path.GetFileName(image);
-        if (!name.Equals("svchost.exe", StringComparison.OrdinalIgnoreCase)) return false;
+        if (!WindowsConfigTools.Contains(name, StringComparer.OrdinalIgnoreCase)) return false;
 
         var system32 = Environment.GetFolderPath(Environment.SpecialFolder.System);
         return image.StartsWith(system32, StringComparison.OrdinalIgnoreCase);
@@ -350,13 +357,16 @@ public sealed class HipsRegistryWatcher : IDisposable
 
     private static readonly TimeSpan FirewallIntentWindow = TimeSpan.FromSeconds(60);
 
-    private static bool OwnFirewallChangeAnnounced()
+    private static string IntentMarkerFor(string area)
+        => area == RegistryWriters.DnsInterfaces ? "dns-intent" : "fw-intent";
+
+    private static bool OwnChangeAnnounced(string area)
     {
         try
         {
             var marker = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "Malward", "data", "fw-intent");
+                "Malward", "data", IntentMarkerFor(area));
             if (!File.Exists(marker)) return false;
             var text = File.ReadAllText(marker).Trim();
             if (!DateTime.TryParse(text, System.Globalization.CultureInfo.InvariantCulture,
@@ -386,6 +396,20 @@ public sealed class HipsRegistryWatcher : IDisposable
                 return Unchanged();
             }
 
+            switch (PolicyAuthor(RegistryWriters.DnsInterfaces))
+            {
+                case ChangeAuthor.Own:
+                    Log.Debug("HIPS-Reg", $"DNS changed by Malward itself, skipping: {Readable(snapKey)}");
+                    return Unchanged();
+
+                case ChangeAuthor.WindowsService:
+
+                    Log.Info("HIPS", $"DNS at {Readable(snapKey)} was changed through Windows network "
+                                   + "configuration — recorded, not reverted.");
+                    mode = HipsRules.Mode.Log;
+                    break;
+            }
+
             if (mode == HipsRules.Mode.Block
                 && change != Change.Removed
                 && ValueNameOf(snapKey).Equals("NameServer", StringComparison.OrdinalIgnoreCase)
@@ -400,13 +424,13 @@ public sealed class HipsRegistryWatcher : IDisposable
         if (ruleId.Equals("reg.firewall_policy", StringComparison.OrdinalIgnoreCase)
             && mode == HipsRules.Mode.Block)
         {
-            switch (FirewallPolicyAuthor())
+            switch (PolicyAuthor(RegistryWriters.FirewallPolicy))
             {
-                case FirewallAuthor.Own:
+                case ChangeAuthor.Own:
                     Log.Debug("HIPS-Reg", $"Firewall policy changed by Malward itself, skipping: {Readable(snapKey)}");
                     return Unchanged();
 
-                case FirewallAuthor.FirewallService:
+                case ChangeAuthor.WindowsService:
 
                     Log.Info("HIPS", $"Firewall policy changed through the Windows firewall service "
                                    + $"at {Readable(snapKey)} — recorded, not reverted.");
@@ -416,7 +440,15 @@ public sealed class HipsRegistryWatcher : IDisposable
         }
 
         string? extra;
-        if (change == Change.Removed) extra = "wpis usunięty";
+        if (change == Change.Removed)
+        {
+            if (IsPerUserServiceInstance(snapKey))
+            {
+                Log.Debug("HIPS-Reg", $"Per-user service instance removed by Windows, skipping: {Readable(snapKey)}");
+                return Unchanged();
+            }
+            extra = "wpis usunięty";
+        }
         else if (!Worth(ruleId, snapKey, now?.Value ?? "", out extra)) return Unchanged();
 
         if (HipsSelfGuard.IsOwnRegistryFootprint(ruleId, Readable(snapKey), now?.Value, old?.Value))
@@ -721,6 +753,28 @@ public sealed class HipsRegistryWatcher : IDisposable
         int cut = rest.IndexOfAny(new[] { '\\', '|' });
         var name = cut < 0 ? rest : rest[..cut];
         return name.Length == 0 ? null : name;
+    }
+
+    private static bool IsPerUserServiceInstance(string snapKey)
+    {
+        var name = ServiceNameOf(snapKey);
+        if (name == null) return false;
+
+        int split = name.LastIndexOf('_');
+        if (split <= 0 || split == name.Length - 1) return false;
+
+        var suffix = name[(split + 1)..];
+        if (suffix.Length is < 4 or > 10) return false;
+        foreach (var c in suffix)
+            if (!Uri.IsHexDigit(c)) return false;
+
+        try
+        {
+            using var template = Registry.LocalMachine.OpenSubKey(
+                $@"System\CurrentControlSet\Services\{name[..split]}");
+            return template != null;
+        }
+        catch { return false; }
     }
 
     private static string? ServiceImagePath(string serviceName)

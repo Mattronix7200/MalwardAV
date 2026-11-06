@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -55,7 +55,8 @@ public sealed class ActivityReporter : IDisposable
     private Thread? _thread;
     private volatile bool _running;
 
-    public sealed record RecentItem(string Path, string Verdict, string? Detection, long Ts);
+    public sealed record RecentItem(string Path, string Verdict, string? Detection, long Ts,
+                                    string? Stage);
 
     public void SetCurrentFile(string path) => _currentFile = path ?? "";
 
@@ -105,7 +106,8 @@ public sealed class ActivityReporter : IDisposable
     }
 
     public void ReportScanned(string path, string verdict, string? detection,
-                              bool cloudChecked = false, bool showInFeed = true)
+                              bool cloudChecked = false, bool showInFeed = true,
+                              string? stage = null)
     {
         Interlocked.Increment(ref _scannedTotal);
         bool threat = string.Equals(verdict, "Threat", StringComparison.OrdinalIgnoreCase);
@@ -115,13 +117,13 @@ public sealed class ActivityReporter : IDisposable
             Interlocked.Increment(ref _cloudTotal);
 
         if (threat || (showInFeed && !IsSystemNoise(path)))
-            PushRecent(path, verdict, detection);
+            PushRecent(path, verdict, detection, stage);
     }
 
-    private void PushRecent(string path, string verdict, string? detection)
+    private void PushRecent(string path, string verdict, string? detection, string? stage = null)
     {
         _recent.Enqueue(new RecentItem(path, verdict, detection,
-            DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds(), stage));
         while (_recent.Count > RecentMax) _recent.TryDequeue(out _);
     }
 
@@ -258,7 +260,8 @@ public sealed class ActivityReporter : IDisposable
             detections = Interlocked.Read(ref _blockedTotal),
             recent = _recent.Reverse().Take(RecentMax).Select(r => new
             {
-                path = r.Path, verdict = r.Verdict, detection = r.Detection, ts = r.Ts
+                path = r.Path, verdict = r.Verdict, detection = r.Detection, ts = r.Ts,
+                stage = r.Stage
             }).ToList(),
         };
 

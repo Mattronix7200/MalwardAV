@@ -56,7 +56,7 @@ internal static class Program
         {
             Log.Info("Shield", "Network shield: disabled by the user — not hosted in this process.");
 
-            _ = Task.Run(RepairStaleDnsWithShieldOffAsync);
+            if (ModuleBridge.NetworkInstalled) _ = Task.Run(RepairStaleDnsWithShieldOffAsync);
         }
 
         var host = builder.Build();
@@ -69,14 +69,11 @@ internal static class Program
     {
         try
         {
-            Malward.NetworkScanner.Log.FileLoggingEnabled = true;
-            var mgr = new Malward.NetworkScanner.SystemDnsManager();
-            if (Malward.NetworkScanner.SystemDnsManager.HasPendingSnapshot())
-            {
+            bool pending = ModuleBridge.DnsSnapshotPending();
+            if (pending)
                 Log.Warn("Shield", "Network shield is off but a DNS snapshot is pending — restoring system DNS.");
-                await mgr.RecoverStaleAsync();
-            }
-            int reset = await mgr.RepairOrphanedLoopbackAsync();
+
+            int reset = await ModuleBridge.RepairStaleDnsAsync(pending);
             if (reset > 0)
                 Log.Warn("Shield", $"Network shield is off: reset {reset} interface(s) that still pointed at 127.0.0.1 with no resolver listening.");
             else

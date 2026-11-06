@@ -102,8 +102,14 @@ public sealed class ThreatHandler
         string name = BehaviorThreatName(alert.Category);
         _notify.Threat("Behavioural threat", proc.ImagePath, name, AlertSeverity.High);
 
-        await NeutralizeAsync(proc.Pid, proc.ImagePath, name, ct, rollbackFiles: true,
-                              source: "Behaviour");
+        var action = _config.BehaviorAction;
+        Log.Info("Behavior", $"{name}: configured action is {action}");
+
+        await NeutralizeAsync(proc.Pid, proc.ImagePath, name, ct,
+                              rollbackFiles: action is BehaviorAction.KillRollback
+                                                    or BehaviorAction.KillRollbackQuarantine,
+                              source: "Behaviour",
+                              quarantineSource: action == BehaviorAction.KillRollbackQuarantine);
 
         TrySubmitBehavioral(proc.ImagePath, name);
     }
@@ -158,7 +164,8 @@ public sealed class ThreatHandler
     }
 
     private async Task NeutralizeAsync(int? pid, string filePath, string threat,
-        CancellationToken ct, bool rollbackFiles = false, string source = "")
+        CancellationToken ct, bool rollbackFiles = false, string source = "",
+        bool quarantineSource = true)
     {
         bool inQuar = SystemGuard.IsInQuarantine(filePath);
         bool fileUntouchable = SystemGuard.IsUntouchableForRepair(filePath) && !inQuar;
@@ -245,11 +252,15 @@ public sealed class ThreatHandler
         int handled = 0;
 
         var unresolved = new List<string>();
-        foreach (var mp in malwarePaths)
-        {
-            if (delete ? DeleteFile(mp) : QuarantineFile(mp, threat)) handled++;
-            else if (File.Exists(mp)) unresolved.Add(mp);
-        }
+        if (!quarantineSource && malwarePaths.Count > 0)
+            Log.Info("Threat", $"{threat}: the behavioural setting keeps the source file in place "
+                               + $"({malwarePaths.Count} path(s)) — only the processes were stopped.");
+        else
+            foreach (var mp in malwarePaths)
+            {
+                if (delete ? DeleteFile(mp) : QuarantineFile(mp, threat)) handled++;
+                else if (File.Exists(mp)) unresolved.Add(mp);
+            }
 
         int rolledBack = 0;
         RollbackResult? backupResult = null;
@@ -394,39 +405,50 @@ public sealed class ThreatHandler
         catch { return null; }
     }
 
+    private static bool AppearedDuringAttack(string path, DateTime cutoffUtc)
+    {
+        try
+        {
+            if (File.GetCreationTimeUtc(path) >= cutoffUtc) return true;
+            Log.Info("Rollback", $"{path} existed before the attack started — left in place.");
+            return false;
+        }
+        catch { return false; }
+    }
+
     private int RollbackProcessFileChanges(int targetPid, string threat, bool delete)
     {
         var pids = new HashSet<int> { targetPid };
         foreach (var d in NativeProcess.GetDescendantsLeafFirst(targetPid)) pids.Add(d);
 
         var created = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var p in pids)
-            foreach (var ch in _tracker.GetChanges(p))
-                if (ch.Kind == ChangeKind.FileCreate && !string.IsNullOrEmpty(ch.Location))
-                    created.Add(ch.Location);
-
-        int n = 0;
-        foreach (var path in created)
-        {
-            if (SystemGuard.IsUntouchable(path) || SystemGuard.IsInQuarantine(path)) continue;
-            if (!File.Exists(path)) continue;
-            if (delete ? DeleteFile(path) : QuarantineFile(path, threat)) n++;
-        }
-
         var touchedDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         DateTimeOffset attackStart = DateTimeOffset.UtcNow;
+
         foreach (var p in pids)
             foreach (var ch in _tracker.GetChanges(p))
             {
-                if ((ch.Kind == ChangeKind.FileCreate || ch.Kind == ChangeKind.FileModify || ch.Kind == ChangeKind.FileDelete)
-                    && !string.IsNullOrEmpty(ch.Location))
+                if (string.IsNullOrEmpty(ch.Location)) continue;
+                if (ch.Kind == ChangeKind.FileCreate) created.Add(ch.Location);
+                if (ch.Kind == ChangeKind.FileCreate || ch.Kind == ChangeKind.FileModify
+                    || ch.Kind == ChangeKind.FileDelete)
                 {
                     var d = Path.GetDirectoryName(ch.Location);
                     if (!string.IsNullOrEmpty(d)) touchedDirs.Add(d);
                     if (ch.Timestamp < attackStart) attackStart = ch.Timestamp;
                 }
             }
+
         var noteCutoff = attackStart.AddMinutes(-2).UtcDateTime;
+
+        int n = 0;
+        foreach (var path in created)
+        {
+            if (SystemGuard.IsUntouchable(path) || SystemGuard.IsInQuarantine(path)) continue;
+            if (!File.Exists(path)) continue;
+            if (!AppearedDuringAttack(path, noteCutoff)) continue;
+            if (delete ? DeleteFile(path) : QuarantineFile(path, threat)) n++;
+        }
         foreach (var dir in touchedDirs)
         {
             if (SystemGuard.IsUntouchable(dir)) continue;

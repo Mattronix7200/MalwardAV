@@ -73,6 +73,18 @@ public sealed class ShieldConfig
     [JsonPropertyName("behavior_user_decides")]
     public bool BehaviorUserDecides { get; set; } = false;
 
+    [JsonPropertyName("behavior_action")]
+    public string BehaviorActionName { get; set; } = "kill_rollback";
+
+    [JsonIgnore]
+    public BehaviorAction BehaviorAction => (BehaviorActionName ?? "").ToLowerInvariant() switch
+    {
+        "ask" => BehaviorAction.Ask,
+        "kill" => BehaviorAction.Kill,
+        "kill_rollback_quarantine" => BehaviorAction.KillRollbackQuarantine,
+        _ => BehaviorAction.KillRollback,
+    };
+
     [JsonPropertyName("pre_launch_analysis")]
     public bool PreLaunchAnalysis { get; set; } = true;
 
@@ -115,8 +127,7 @@ public sealed class ShieldConfig
     [JsonPropertyName("cloud_for_unknown_only")]
     public bool CloudForUnknownOnly   { get; set; } = true;
 
-    [JsonPropertyName("trust_whitelist")]
-    public bool TrustWhitelist        { get; set; } = true;
+
 
     [JsonPropertyName("log_level")]
     public string LogLevel            { get; set; } = "Info";
@@ -383,11 +394,11 @@ public sealed class ShieldConfig
             }
             catch { resident = true; network = true; }
 
-            bool backup = true;
+            bool backup = ModuleBridge.BackupInstalled;
             try
             {
-                var bkPath = Malward.BackupEngine.BackupConfig.DefaultConfigPath;
-                if (File.Exists(bkPath))
+                var bkPath = backup ? ModuleBridge.BackupConfigPath() : "";
+                if (backup && File.Exists(bkPath))
                 {
                     using var doc = JsonDocument.Parse(File.ReadAllText(bkPath));
                     if (doc.RootElement.ValueKind == JsonValueKind.Object

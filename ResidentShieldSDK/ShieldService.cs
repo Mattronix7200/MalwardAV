@@ -119,13 +119,9 @@ public sealed class ShieldService : IAsyncDisposable
         _pipe = new HookPipe(_scanner, _config, ct);
         _pipe.Start();
 
-        if (_config.ScanRemovable)
-        {
-            _removable = new RemovableScanWatcher(_scanner.MalscanPath);
-            _removable.Start();
-        }
+        SyncRemovableWatcher();
 
-        Malward.NetworkScanner.DangerousConnectionBus.Handler = OnDangerousConnection;
+        if (ModuleBridge.NetworkInstalled) ModuleBridge.WireDangerousConnections(OnDangerousConnection);
 
         _hipsSupervisor = new Timer(_ => SyncHipsWatchers(), null, TimeSpan.Zero, TimeSpan.FromSeconds(3));
 
@@ -148,7 +144,7 @@ public sealed class ShieldService : IAsyncDisposable
         _cts.Cancel();
         _priority.Writer.TryComplete();
         _normal.Writer.TryComplete();
-        Malward.NetworkScanner.DangerousConnectionBus.Handler = null;
+        if (ModuleBridge.NetworkInstalled) ModuleBridge.UnwireDangerousConnections();
         _activity.Stop();
         _usn?.Stop();
         _userFolders?.Stop();
@@ -180,8 +176,7 @@ public sealed class ShieldService : IAsyncDisposable
             bool structuralChange =
                 fresh.FileMonitorEnabled != _config.FileMonitorEnabled ||
                 fresh.UsnJournalEnabled  != _config.UsnJournalEnabled  ||
-                fresh.ActiveProcessScan  != _config.ActiveProcessScan  ||
-                fresh.ScanRemovable      != _config.ScanRemovable;
+                fresh.ActiveProcessScan  != _config.ActiveProcessScan;
 
             if (structuralChange)
             {
@@ -191,6 +186,7 @@ public sealed class ShieldService : IAsyncDisposable
 
             _config.CopyFrom(fresh);
             _fileWatcher?.ApplySettings();
+            SyncRemovableWatcher();
             SyncHipsWatchers();
 
             Log.Info("Shield", "Settings applied without stopping protection.");
@@ -201,6 +197,25 @@ public sealed class ShieldService : IAsyncDisposable
             Log.Warn("Shield", $"Could not apply settings in place ({ex.GetType().Name}: {ex.Message}) — falling back to a module rebuild.");
             return Task.FromResult(false);
         }
+    }
+
+    private void SyncRemovableWatcher()
+    {
+        try
+        {
+            if (_config.ScanRemovable && _removable == null)
+            {
+                _removable = new RemovableScanWatcher(_scanner.MalscanPath);
+                _removable.Start();
+            }
+            else if (!_config.ScanRemovable && _removable != null)
+            {
+                _removable.Stop();
+                _removable = null;
+                Log.Info("Removable", "Automatic scanning of attached media disabled — watcher stopped.");
+            }
+        }
+        catch (Exception ex) { Log.Warn("Removable", $"Could not apply the setting: {ex.Message}"); }
     }
 
     private void SyncHipsWatchers()
@@ -435,9 +450,15 @@ public sealed class ShieldService : IAsyncDisposable
 
     private void RunBootBackup()
     {
+        if (!ModuleBridge.BackupInstalled)
+        {
+            Log.Info("Boot", "Boot sector backup skipped - the backup module is not installed.");
+            return;
+        }
+
         try
         {
-            Malward.BackupEngine.BootSectorGuard.Backup();
+            ModuleBridge.BackupBootSector();
             Log.Info("Boot", "Boot sector backup completed.");
         }
         catch (Exception ex)
@@ -467,15 +488,16 @@ public sealed class ShieldService : IAsyncDisposable
 
     private bool StrictProfile => _hips.Tier is "high" or "paranoic";
 
-    private void OnDangerousConnection(Malward.NetworkScanner.DangerousConnection c)
+    private void OnDangerousConnection(int pid, string processName, string imagePath,
+                                       string remoteIp, int remotePort, string detection)
     {
-        if (string.IsNullOrEmpty(c.ImagePath) || !File.Exists(c.ImagePath)) return;
-        if (c.Pid <= 4 || c.Pid == Environment.ProcessId) return;
-        if (Hips.HipsSelfGuard.IsOwnProcessTree(c.Pid)) return;
+        if (string.IsNullOrEmpty(imagePath) || !File.Exists(imagePath)) return;
+        if (pid <= 4 || pid == Environment.ProcessId) return;
+        if (Hips.HipsSelfGuard.IsOwnProcessTree(pid)) return;
 
-        var proc = new ProcessInfo(c.Pid, 0, c.ProcessName, c.ImagePath, "", DateTimeOffset.UtcNow);
-        var alert = new BehaviorAlert(c.Pid, c.ProcessName, BehaviorSeverity.High, c.Detection,
-            $"Connection to a known malicious address {c.RemoteIp}:{c.RemotePort} "
+        var proc = new ProcessInfo(pid, 0, processName, imagePath, "", DateTimeOffset.UtcNow);
+        var alert = new BehaviorAlert(pid, processName, BehaviorSeverity.High, detection,
+            $"Connection to a known malicious address {remoteIp}:{remotePort} "
             + "from the malicious-address database");
 
         OnBehaviorAlert(alert, proc);
@@ -600,7 +622,8 @@ public sealed class ShieldService : IAsyncDisposable
 
             _activity.ReportScanned(ev.FilePath, result.Verdict.ToString(), result.ThreatName,
                                     result.CloudChecked,
-                                    showInFeed: ev.Kind != ScanEventKind.ProcessStarted);
+                                    showInFeed: ev.Kind != ScanEventKind.ProcessStarted,
+                                    stage: result.Verdict == ScanVerdict.Threat ? result.Detail : null);
 
             if (result.Verdict == ScanVerdict.Threat)
                 Log.Alert("Scan", $"THREAT {Path.GetFileName(ev.FilePath)} | {result.ThreatName}");

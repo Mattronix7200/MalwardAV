@@ -6,7 +6,13 @@ public static class RegistryWriters
 {
     public const string FirewallPolicy = "firewallpolicy";
 
-    private static readonly string[] Areas = { FirewallPolicy };
+    public const string DnsInterfaces = "dns-interfaces";
+
+    private static readonly (string Area, string Needle)[] Areas =
+    {
+        (FirewallPolicy, "firewallpolicy"),
+        (DnsInterfaces, @"\parameters\interfaces"),
+    };
 
     private static readonly TimeSpan Window = TimeSpan.FromMinutes(2);
 
@@ -19,10 +25,10 @@ public static class RegistryWriters
     {
         area = "";
         if (string.IsNullOrEmpty(keyPath)) return false;
-        foreach (var a in Areas)
+        foreach (var (name, needle) in Areas)
         {
-            if (keyPath.IndexOf(a, StringComparison.OrdinalIgnoreCase) < 0) continue;
-            area = a;
+            if (keyPath.IndexOf(needle, StringComparison.OrdinalIgnoreCase) < 0) continue;
+            area = name;
             return true;
         }
         return false;

@@ -795,10 +795,6 @@ public sealed class HipsFileWatcher : IDisposable
         catch { }
     }
 
-    private static readonly Malward.NetworkScanner.BotIpBlocklist BadIps =
-        new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                         "Malward", "data", "vps-ex01.vdeb"));
-
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime When, bool Bad)>
         HostVerdicts = new(StringComparer.OrdinalIgnoreCase);
 
@@ -808,7 +804,7 @@ public sealed class HipsFileWatcher : IDisposable
         {
             var (on, mode) = _hips.StateOf("file.badip_source");
             if (!_hips.Enabled || !on) return;
-            if (BadIps.IsEmpty) return;
+            if (!ModuleBridge.NetworkInstalled || ModuleBridge.BadIpListEmpty()) return;
             if (!File.Exists(path)) return;
             if (SystemGuard.IsOwnComponent(path)) return;
             if (_hips.IsExcepted("file.badip_source", path)) return;
@@ -897,11 +893,12 @@ public sealed class HipsFileWatcher : IDisposable
     internal static bool HostIsBad(string host, out string ip)
     {
         ip = "";
+        if (!ModuleBridge.NetworkInstalled) return false;
 
         if (System.Net.IPAddress.TryParse(host, out var literal))
         {
             ip = literal.ToString();
-            return BadIps.Contains(ip);
+            return ModuleBridge.IsBadIp(ip);
         }
 
         if (HostVerdicts.TryGetValue(host, out var cached)
@@ -916,7 +913,7 @@ public sealed class HipsFileWatcher : IDisposable
             foreach (var a in System.Net.Dns.GetHostAddresses(host))
             {
                 var t = a.ToString();
-                if (BadIps.Contains(t))
+                if (ModuleBridge.IsBadIp(t))
                 {
                     ip = t;
                     HostVerdicts[host] = (DateTime.UtcNow, true);

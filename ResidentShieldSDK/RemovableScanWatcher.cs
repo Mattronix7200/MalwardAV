@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 
 namespace Malward.ResidentShield;
@@ -38,7 +39,11 @@ public sealed class RemovableScanWatcher : IDisposable
                 }
             }
 
-            _seen.RemoveWhere(x => !current.Contains(x));
+            foreach (var gone in _seen.Where(x => !current.Contains(x)).ToList())
+            {
+                lock (UsbCache) UsbCache.Remove(gone.TrimEnd('\\'));
+                _seen.Remove(gone);
+            }
         }
         catch (Exception ex) { Log.Warn("Removable", $"tick error: {ex.Message}"); }
     }
@@ -52,7 +57,7 @@ public sealed class RemovableScanWatcher : IDisposable
             {
                 try
                 {
-                    if (d.DriveType != DriveType.Removable) continue;
+                    if (!IsRemovableMedium(d)) continue;
                     if (!d.IsReady) continue;
                     set.Add(d.RootDirectory.FullName);
                 }
@@ -63,15 +68,120 @@ public sealed class RemovableScanWatcher : IDisposable
         return set;
     }
 
+    private static bool IsRemovableMedium(DriveInfo d)
+    {
+        if (d.DriveType is DriveType.Removable or DriveType.CDRom) return true;
+
+        return d.DriveType == DriveType.Fixed && IsUsbAttached(d.Name);
+    }
+
+    private const uint GENERIC_NONE = 0;
+    private const uint FILE_SHARE_READ_WRITE = 0x00000003;
+    private const uint OPEN_EXISTING = 3;
+    private const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400;
+    private const int BusTypeUsb = 0x07;
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sec,
+                                             uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DeviceIoControl(IntPtr device, uint code,
+                                               byte[] inBuffer, int inSize,
+                                               byte[] outBuffer, int outSize,
+                                               out int returned, IntPtr overlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    private static readonly Dictionary<string, bool> UsbCache = new(StringComparer.OrdinalIgnoreCase);
+
+    private static bool IsUsbAttached(string root)
+    {
+        var letter = root.TrimEnd('\\');
+        if (letter.Length != 2 || letter[1] != ':') return false;
+
+        lock (UsbCache)
+        {
+            if (UsbCache.TryGetValue(letter, out var cached)) return cached;
+        }
+
+        bool usb = QueryBusType(letter) == BusTypeUsb;
+        lock (UsbCache)
+        {
+            if (UsbCache.Count > 64) UsbCache.Clear();
+            UsbCache[letter] = usb;
+        }
+        return usb;
+    }
+
+    private static int QueryBusType(string letter)
+    {
+        IntPtr handle = IntPtr.Zero;
+        try
+        {
+            handle = CreateFileW(@"\\.\" + letter, GENERIC_NONE, FILE_SHARE_READ_WRITE,
+                                 IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+            if (handle == IntPtr.Zero || handle == new IntPtr(-1)) return -1;
+
+            var query = new byte[12];
+            var descriptor = new byte[512];
+            if (!DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY,
+                                 query, query.Length, descriptor, descriptor.Length,
+                                 out int returned, IntPtr.Zero) || returned < 32)
+                return -1;
+
+            return BitConverter.ToInt32(descriptor, 28);
+        }
+        catch { return -1; }
+        finally { if (handle != IntPtr.Zero && handle != new IntPtr(-1)) CloseHandle(handle); }
+    }
+
     private static readonly string EventsFile = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "Malward", "data", "shield-events.jsonl");
+
+    private static readonly string CancelFile = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "Malward", "data", "removable-cancel");
+
+    private static bool CancelRequested(string root)
+    {
+        try
+        {
+            if (!File.Exists(CancelFile)) return false;
+            var want = root.TrimEnd('\\');
+            foreach (var line in File.ReadAllLines(CancelFile))
+                if (line.Trim().TrimEnd('\\').Equals(want, StringComparison.OrdinalIgnoreCase))
+                    return true;
+        }
+        catch { }
+        return false;
+    }
+
+    private static void ClearCancel(string root)
+    {
+        try
+        {
+            if (!File.Exists(CancelFile)) return;
+            var want = root.TrimEnd('\\');
+            var keep = File.ReadAllLines(CancelFile)
+                .Where(l => !l.Trim().TrimEnd('\\').Equals(want, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (keep.Length == 0) File.Delete(CancelFile);
+            else File.WriteAllLines(CancelFile, keep);
+        }
+        catch { }
+    }
 
     private void RunMalscan(string root)
     {
         try
         {
             Log.Info("Removable", $"Scanning newly attached medium: {root}");
+            ClearCancel(root);
             EmitEvent("removable.started", root, detection: null, threats: 0);
 
             int threats = 0;
@@ -83,7 +193,7 @@ public sealed class RemovableScanWatcher : IDisposable
 
             foreach (var file in files)
             {
-                var detection = Malward.NetworkScanner.SharedScanPipeline.ScanFile(file);
+                var detection = Malward.Engine.Core.SharedPipeline.ScanFile(file);
                 done++;
 
                 if (!string.IsNullOrEmpty(detection))
@@ -98,9 +208,15 @@ public sealed class RemovableScanWatcher : IDisposable
                     lastProgressEmit = DateTime.UtcNow;
                     int pct = total > 0 ? (int)(100L * done / total) : 0;
                     EmitProgress(root, pct.ToString(), done.ToString(), total.ToString(), file);
+                    if (CancelRequested(root))
+                    {
+                        Log.Info("Removable", $"Scan of {root} cancelled by the user after {done} file(s).");
+                        break;
+                    }
                 }
             }
 
+            ClearCancel(root);
             Log.Info("Removable", $"Scan of {root} finished (files: {done}, threats: {threats}).");
             EmitEvent("removable.finished", root, firstDetection, threats);
         }
