@@ -24,6 +24,14 @@ internal static class BlockPageRenderer
         "<line x1=\"12\" y1=\"9\" x2=\"12\" y2=\"13\"/>" +
         "<line x1=\"12\" y1=\"17\" x2=\"12.01\" y2=\"17\"/></svg>";
 
+    private const string AdIconSvg =
+        "<svg viewBox=\"0 0 24 24\" width=\"38\" height=\"38\" fill=\"none\" " +
+        "stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" " +
+        "stroke-linejoin=\"round\" aria-hidden=\"true\">" +
+        "<rect x=\"2.5\" y=\"4.5\" width=\"19\" height=\"15\" rx=\"1.5\"/>" +
+        "<path d=\"M7 15 L9.5 9 L12 15\"/><line x1=\"7.9\" y1=\"13.2\" x2=\"11.1\" y2=\"13.2\"/>" +
+        "<path d=\"M14.5 15 V9 h1.8 a3 3 0 0 1 0 6 z\"/></svg>";
+
     private const string ShieldSvg =
         "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" " +
         "stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">" +
@@ -43,19 +51,65 @@ internal static class BlockPageRenderer
             ? ShieldSvg.Replace("<svg viewBox", $"<svg width=\"{sizePx}\" height=\"{sizePx}\" viewBox")
             : $"<img src=\"{LogoDataUri.Value}\" width=\"{sizePx}\" height=\"{sizePx}\" alt=\"Malward\" style=\"display:block\">";
 
+    private enum BlockKind { Threat, Ads, Tracking }
+
+    private static BlockKind KindOf(string? detection, string? source)
+    {
+        var d = (detection ?? "").ToLowerInvariant();
+        if (d.StartsWith("tracking.", StringComparison.Ordinal)) return BlockKind.Tracking;
+        if (d.StartsWith("ads.", StringComparison.Ordinal)) return BlockKind.Ads;
+        if (string.Equals(source, "adblock", StringComparison.OrdinalIgnoreCase)) return BlockKind.Ads;
+        return BlockKind.Threat;
+    }
+
     public static string Render(string host, string? detection, string? source)
     {
         string safeHost = Escape(host);
+        var kind = KindOf(detection, source);
+
         string srcLabel = source switch
         {
-            "live"  => Malward.Engine.Util.Loc.T("Wykryto na żywo przez serwer Malward"),
-            "cloud" => Malward.Engine.Util.Loc.T("Skaner w chmurze"),
-            "local" => Malward.Engine.Util.Loc.T("Wykryto przez lokalną bazę reputacji"),
-            _       => Malward.Engine.Util.Loc.T("Wykryto przez osłonę sieciową Malward"),
+            "live"    => Malward.Engine.Util.Loc.T("Wykryto na żywo przez serwer Malward"),
+            "cloud"   => Malward.Engine.Util.Loc.T("Skaner w chmurze"),
+            "local"   => Malward.Engine.Util.Loc.T("Wykryto przez lokalną bazę reputacji"),
+            "adblock" => Malward.Engine.Util.Loc.T("Listy filtrów blokowania reklam"),
+            _         => Malward.Engine.Util.Loc.T("Wykryto przez osłonę sieciową Malward"),
         };
-        string detLabel = string.IsNullOrEmpty(detection)
-            ? Escape(DnsProxy.BuildDetectionName(safeHost))
-            : Escape(detection!);
+
+        string technical = string.IsNullOrEmpty(detection)
+            ? DnsProxy.BuildDetectionName(host)
+            : detection!;
+
+        string detLabel = kind switch
+        {
+            BlockKind.Ads      => Malward.Engine.Util.Loc.T("Domena reklamowa"),
+            BlockKind.Tracking => Malward.Engine.Util.Loc.T("Domena szpiegująca lub zbierająca dane"),
+            _                  => Malward.Engine.Util.Loc.T("Niebezpieczna witryna"),
+        };
+
+        string heading = kind switch
+        {
+            BlockKind.Ads      => Malward.Engine.Util.Loc.T("Reklama zablokowana"),
+            BlockKind.Tracking => Malward.Engine.Util.Loc.T("Śledzenie zablokowane"),
+            _                  => Malward.Engine.Util.Loc.T("Strona zablokowana"),
+        };
+
+        string lead = kind switch
+        {
+            BlockKind.Ads      => Malward.Engine.Util.Loc.T("Osłona sieciowa Malward zablokowała domenę serwującą reklamy."),
+            BlockKind.Tracking => Malward.Engine.Util.Loc.T("Osłona sieciowa Malward zablokowała domenę śledzącą użytkowników."),
+            _                  => Malward.Engine.Util.Loc.T("Osłona sieciowa Malward zablokowała dostęp do tej witryny."),
+        };
+
+        string note = kind switch
+        {
+            BlockKind.Ads      => Malward.Engine.Util.Loc.T("Ta domena nie zawiera treści strony, którą chcesz obejrzeć — serwuje wyłącznie reklamy. Nic nie zostało usunięte z komputera. Jeśli bez niej strona nie działa, wyłącz wybraną listę filtrów w aplikacji Malward → Ochrona → Listy filtrów."),
+            BlockKind.Tracking => Malward.Engine.Util.Loc.T("Ta domena zbiera dane o tym, co oglądasz, i przekazuje je dalej. Nic nie zostało usunięte z komputera. Jeśli bez niej strona nie działa, wyłącz wybraną listę filtrów w aplikacji Malward → Ochrona → Listy filtrów."),
+            _                  => Malward.Engine.Util.Loc.T("Strona została zaklasyfikowana jako szkodliwa lub niezaufana. Otwarcie jej może prowadzić do wyłudzenia danych, pobrania złośliwego pliku albo śledzenia użytkownika. Jeśli masz pewność, że to fałszywy alarm, dodaj domenę ręcznie w aplikacji Malward → Ochrona → Ustawienia osłony sieciowej."),
+        };
+
+        string headerColor = kind == BlockKind.Threat ? "#c42b2b" : "#b4690e";
+        string icon = kind == BlockKind.Threat ? ErrorIconSvg : AdIconSvg;
 
         var nowLocal = DateTime.Now;
         string ts = nowLocal.ToString("yyyy-MM-dd HH:mm:ss");
@@ -65,21 +119,22 @@ internal static class BlockPageRenderer
 
         return RenderShell(
             title: Malward.Engine.Util.Loc.T("Malward — strona zablokowana"),
+            headerOverrideColor: headerColor,
             bodyHtml: $@"
   <main class=""card"" role=""alert"">
-    <div class=""head"">
-      <div class=""icon"" aria-hidden=""true"">{ErrorIconSvg}</div>
+    <div class=""head"" style=""background: linear-gradient(135deg, {headerColor}, color-mix(in srgb, {headerColor} 75%, #000));"">
+      <div class=""icon"" aria-hidden=""true"">{icon}</div>
       <div class=""title"">
-        <h1>{Malward.Engine.Util.Loc.T("Strona zablokowana")}</h1>
-        <p>{Malward.Engine.Util.Loc.T("Osłona sieciowa Malward zablokowała dostęp do tej witryny.")}</p>
+        <h1>{heading}</h1>
+        <p>{lead}</p>
       </div>
     </div>
     <div class=""body"">
       <div class=""row""><div class=""lbl"">{Malward.Engine.Util.Loc.T("Adres URL")}</div><div class=""val"">{safeHost}</div></div>
-      <div class=""row""><div class=""lbl"">{Malward.Engine.Util.Loc.T("Detekcja")}</div><div class=""val det"">{detLabel}</div></div>
+      <div class=""row""><div class=""lbl"">{Malward.Engine.Util.Loc.T("Detekcja")}</div><div class=""val"">{Escape(detLabel)}<span class=""det"">{Escape(technical)}</span></div></div>
       <div class=""row""><div class=""lbl"">{Malward.Engine.Util.Loc.T("Źródło")}</div><div class=""val"">{Escape(srcLabel)}</div></div>
       <div class=""note"">
-        {Malward.Engine.Util.Loc.T("Strona została zaklasyfikowana jako szkodliwa lub niezaufana. Otwarcie jej może prowadzić do wyłudzenia danych, pobrania złośliwego pliku albo śledzenia użytkownika. Jeśli masz pewność, że to fałszywy alarm, dodaj domenę ręcznie w aplikacji Malward → Ochrona → Ustawienia osłony sieciowej.")}
+        {note}
       </div>
       <div class=""actions"">
         <button class=""btn-back"" type=""button"" onclick=""history.length&gt;1?history.back():window.close()"">
@@ -87,7 +142,7 @@ internal static class BlockPageRenderer
         </button>
       </div>
       <div class=""foot"">
-        <div class=""brand"">{footerLogo}<span class=""brand-text"">Malward<sup class=""brand-tm"">®</sup> Community Edition</span></div>
+        <div class=""brand"">{footerLogo}<span class=""brand-text"">Malward<sup class=""brand-tm"">®</sup> Cloud Scanner</span></div>
         <span>{Malward.Engine.Util.Loc.T("Wygenerowano")}: <time class=""ts"" datetime=""{Escape(tsIso)}"">{Escape(ts)}</time></span>
       </div>
     </div>
@@ -127,6 +182,7 @@ internal static class BlockPageRenderer
 
     private static string RenderShell(string title, string bodyHtml, string? headerOverrideColor = null)
     {
+        string accent = headerOverrideColor ?? "#c42b2b";
         return $@"<!DOCTYPE html>
 <html lang=""pl"">
 <head>
@@ -157,10 +213,6 @@ internal static class BlockPageRenderer
     }}
   }}
 
-  /* FIX (#3): tło rozciągnięte na CAŁĄ wysokość okna — wcześniej `height:100%`
-     nie wypełniał viewportu gdy karta była niska; pojawiał się pasek po dole.
-     `min-height:100vh` + `background-attachment:fixed` to standardowy idiom dla
-     full-page gradientów. */
   html {{ margin: 0; padding: 0; }}
   body {{
     margin: 0; min-height: 100vh;
@@ -170,14 +222,12 @@ internal static class BlockPageRenderer
     color: var(--text); padding: 24px; box-sizing: border-box;
   }}
 
-  /* FIX (#1): brak zaokrąglonych rogów — `border-radius: 0`. */
   .card {{
     width: 100%; max-width: 660px;
     background: var(--card-bg); border: 1px solid var(--card-border);
     border-radius: 0; box-shadow: var(--shadow); overflow: hidden;
   }}
 
-  /* FIX (#4): w nagłówku ikona błędu (czerwony trójkąt), NIE logo Malward. */
   .head {{
     background: linear-gradient(135deg, #c42b2b, #a31e1e);
     padding: 22px 26px; color: #fff;
@@ -192,16 +242,19 @@ internal static class BlockPageRenderer
   .row {{ margin-bottom: 14px; }}
   .lbl {{ font-size: 12px; color: var(--text-mute); text-transform: uppercase; letter-spacing: .4px; }}
   .val {{ font-size: 14.5px; font-weight: 600; word-break: break-all; margin-top: 4px; color: var(--text); }}
-  .det {{ color: #e23b3b; font-family: 'Segoe UI Mono', Consolas, monospace; font-size: 13.5px; }}
+  .det {{
+    display: block; margin-top: 3px; font-weight: 500;
+    color: var(--text-mute); font-family: 'Segoe UI Mono', Consolas, monospace; font-size: 12px;
+  }}
 
   .note {{
     margin-top: 18px; padding: 12px 14px; border-radius: 0;
-    background: var(--note-bg); border: 1px solid var(--note-border);
+    background: color-mix(in srgb, {accent} 7%, transparent);
+    border: 1px solid color-mix(in srgb, {accent} 24%, transparent);
+    border-left: 3px solid {accent};
     font-size: 13px; color: var(--text-dim); line-height: 1.55;
   }}
 
-  /* Akcje pod opisem: PRIMARY (powrót, zielony) + secondary (dodaj wyjątek, czerwony).
-     Primary = bezpieczne wyjście; secondary = ryzykowne kontynuowanie. */
   .actions {{
     margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; align-items: stretch;
   }}
@@ -211,12 +264,10 @@ internal static class BlockPageRenderer
     cursor: pointer; transition: background 120ms ease;
     font-family: inherit; line-height: 1.2;
   }}
-  /* PRIMARY — powrót (zielony jak akcja automatyczna w osłonie rezydentnej) */
   .btn-back {{
     background: #1f7a35; color: #fff; border: 1px solid #1f7a35;
   }}
   .btn-back:hover, .btn-back:focus {{ background: #176028; border-color: #176028; }}
-  /* SECONDARY — dodaj wyjątek (czerwony, akcja ryzykowna) */
   .btn-add {{
     background: var(--btn-bg); color: var(--btn-fg); border: 1px solid var(--btn-bg);
   }}
@@ -226,7 +277,6 @@ internal static class BlockPageRenderer
     font-family: 'Segoe UI Mono', Consolas, monospace; font-weight: 500;
   }}
 
-  /* FIX (#3 dolna część): pełne LOGO Malward + napis w stopce. */
   .foot {{
     margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--foot-border);
     font-size: 11.5px; color: var(--text-mute);

@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 
 namespace Malward.NetworkScanner;
@@ -16,7 +16,8 @@ public sealed class ActivityReporter : IDisposable
     private long _blocked;
 
 
-    private sealed record RecentItem(string Domain, string? Vendor, long Ts, string Source, string? Process);
+    private sealed record RecentItem(string Domain, string? Vendor, long Ts, string Source,
+                                     string? Process, string? List);
     private readonly Queue<RecentItem> _recent = new();
     private const int RecentCap = 50;
     private readonly object _lock = new();
@@ -40,10 +41,12 @@ public sealed class ActivityReporter : IDisposable
 
     public void ReportQuery() => Interlocked.Increment(ref _queries);
 
-    public void ReportBlock(string domain, string? detection, string source, string? process = null)
+    public void ReportBlock(string domain, string? detection, string source, string? process = null,
+                            string? list = null)
     {
         Interlocked.Increment(ref _blocked);
-        var item = new RecentItem(domain, detection, DateTimeOffset.UtcNow.ToUnixTimeSeconds(), source, process);
+        var item = new RecentItem(domain, detection, DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                                  source, process, list);
         lock (_lock)
         {
             _recent.Enqueue(item);
@@ -54,7 +57,7 @@ public sealed class ActivityReporter : IDisposable
         {
             var json = JsonSerializer.Serialize(new
             {
-                ts = item.Ts, type = "block", domain, vendor = detection, source, process,
+                ts = item.Ts, type = "block", domain, vendor = detection, source, process, list,
             });
             File.AppendAllText(EventsFile, json + Environment.NewLine, Encoding.UTF8);
         }
@@ -82,7 +85,7 @@ public sealed class ActivityReporter : IDisposable
             ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
             recent = recent.Select(r => new {
                 domain = r.Domain, vendor = r.Vendor, ts = r.Ts,
-                source = r.Source, process = r.Process,
+                source = r.Source, process = r.Process, list = r.List,
             }).ToArray(),
         };
         var tmp = ActivityFile + ".tmp";

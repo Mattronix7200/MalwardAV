@@ -70,6 +70,16 @@ public sealed class ConnectionMonitor
             bool badIp = !_botIps.IsEmpty && _botIps.Contains(c.RemoteIp);
 
             string? procImg = QueryImagePath(c.Pid);
+
+            if (IsOwnComponent(procImg))
+            {
+                if (badIp)
+                    Log.Debug("ConnMon", $"{c.RemoteIp}:{c.RemotePort} is reached through our own "
+                                       + "filter relaying someone else's request — the decision belongs "
+                                       + "to the DNS and address layers, not here.");
+                continue;
+            }
+
             string? malwareName = null;
             if (!badIp && IsUntrustedPath(procImg))
                 malwareName = CheckImageMalware(procImg);
@@ -222,6 +232,25 @@ public sealed class ConnectionMonitor
             return QueryFullProcessImageNameW(h, 0, sb, ref len) ? sb.ToString() : "";
         }
         finally { CloseHandle(h); }
+    }
+
+    private static readonly string OwnDir = BuildOwnDir();
+
+    private static string BuildOwnDir()
+    {
+        try
+        {
+            var exe = Environment.ProcessPath ?? AppContext.BaseDirectory;
+            var dir = Path.GetDirectoryName(exe);
+            return string.IsNullOrEmpty(dir) ? "" : dir.TrimEnd('\\') + "\\";
+        }
+        catch { return ""; }
+    }
+
+    private static bool IsOwnComponent(string? img)
+    {
+        if (string.IsNullOrEmpty(img) || OwnDir.Length == 0) return false;
+        return img.StartsWith(OwnDir, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsUntrustedPath(string? img)

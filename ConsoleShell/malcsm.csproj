@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <AssemblyName>malcsm</AssemblyName>
+    <RootNamespace>Malward.ConsoleShell</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ApplicationIcon>..\Extras\icon.ico</ApplicationIcon>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+
+    <AssemblyTitle>Malward Command Shell</AssemblyTitle>
+    <Product>Malward Command Shell Manager</Product>
+    <Company>jmSOFT</Company>
+    <Authors>Community Edition</Authors>
+    <Copyright>Copyright (c) 2026 jmSOFT</Copyright>
+    <Description>Malward Command Shell Manager</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\EngineSDK\Malward.Engine\Malward.Engine.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,3 +1,5 @@
+using Malward.NetworkScanner.AdBlock;
+
 namespace Malward.NetworkScanner;
 
 public sealed class NetworkService : IAsyncDisposable
@@ -11,12 +13,18 @@ public sealed class NetworkService : IAsyncDisposable
 
     private BotIpBlocklist? _botIps;
     private readonly SystemDnsManager _dnsMgr = new();
+    private readonly DohGuard _doh = new();
+    private readonly DnsLeakGuard _dnsLeak = new();
+    private readonly BrowserProxyGuard _browserProxy = new();
+    private readonly QuicGuard _quic = new();
+    private UrlFilterProxy? _httpFilter;
     private DnsProxy? _proxy;
     private BlockPageServer? _blockPage;
     private RootCaManager? _rootCa;
     private LeafCertCache? _leaves;
     private TlsBlockServer? _tlsBlock;
     private ConnectionMonitor? _connMon;
+    private AdBlockService? _adBlock;
 
     private Timer? _updateTimer;
     private static readonly string UrlsVdebTarget = Path.Combine(
@@ -42,6 +50,13 @@ public sealed class NetworkService : IAsyncDisposable
         _activity  = new ActivityReporter();
 
         _dnsMgr.ShieldEnabled = () => _config.Enabled && !_stopping;
+        _dnsMgr.OnStandDown = () =>
+        {
+            try { _dnsLeak.Remove(); } catch { }
+            try { _browserProxy.Restore(); } catch { }
+            try { _quic.Remove(); } catch { }
+            try { _httpFilter?.Stop(); } catch { }
+        };
     }
 
     public void Start()
@@ -52,6 +67,13 @@ public sealed class NetworkService : IAsyncDisposable
 
             if (SystemDnsManager.HasPendingSnapshot())
                 _ = Task.Run(async () => { try { await _dnsMgr.RecoverStaleAsync(); } catch { } });
+            if (DohGuard.HasPendingSnapshot())
+                _ = Task.Run(() => { try { _doh.Restore(); } catch { } });
+            _ = Task.Run(() => { try { _dnsLeak.Remove(); } catch { } });
+            if (QuicGuard.HasPendingMarker())
+                _ = Task.Run(() => { try { _quic.Remove(); } catch { } });
+            if (BrowserProxyGuard.HasPendingSnapshot())
+                _ = Task.Run(() => { try { _browserProxy.Restore(); } catch { } });
             return;
         }
 
@@ -89,8 +111,44 @@ public sealed class NetworkService : IAsyncDisposable
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "Malward", "data", "vps-ex01.vdeb"));
 
+        if (_config.AdBlockingEnabled)
+        {
+            _adBlock = new AdBlockService();
+            _adBlock.Cosmetics.Cosmetic = _config.AdBlockCosmetic;
+            _adBlock.Cosmetics.CosmeticGeneric = _config.AdBlockCosmeticGeneric;
+            _adBlock.Cosmetics.Scriptlets = _config.AdBlockScriptlets;
+            _adBlock.Cosmetics.YouTube = _config.AdBlockYouTube;
+            _adBlock.Cosmetics.Stealth = _config.AdBlockStealth;
+            _adBlock.Start(enabled: true, httpFiltering: _config.AdBlockHttpFilter && _config.HttpFilter);
+        }
+
+        AdoptManualUpstreamDns();
+
         _proxy = new DnsProxy(_config, _blocklist, _server, _activity, _blockPage, _botIps, _urlCache);
+        _proxy.AttachAdBlock(_adBlock);
         _proxy.Start();
+
+        if (_config.HttpFilter && _leaves != null)
+        {
+            _httpFilter = new UrlFilterProxy(_leaves, _activity, _blockPage,
+                (host, path, inspected, ct) => _proxy!.VerdictForHttpAsync(host, path, inspected, ct),
+                host => _proxy!.HasPathRules(host),
+            (host, path) => _proxy!.PathVerdict(host, path));
+
+            _httpFilter.AttachAdBlock(_adBlock);
+
+            if (_httpFilter.Start(_config.HttpFilterPort))
+            {
+                _browserProxy.Apply(_httpFilter.ActivePort);
+                if (_config.BlockQuic) _quic.Apply();
+            }
+            else
+                StartHttpFilterRetry();
+        }
+        else if (BrowserProxyGuard.HasPendingSnapshot())
+        {
+            _browserProxy.Restore();
+        }
 
         _connMon = new ConnectionMonitor(_config, _activity, _blockPage, _botIps);
         _connMon.Start();
@@ -104,6 +162,20 @@ public sealed class NetworkService : IAsyncDisposable
                 try { await _dnsMgr.ApplyAsync(); }
                 catch (Exception ex) { Log.Error("Service", $"Auto-DNS apply failed: {ex.Message}"); }
             });
+
+            if (_config.BlockDoh)
+                _ = Task.Run(() =>
+                {
+                    try { _doh.Apply(); }
+                    catch (Exception ex) { Log.Error("Service", $"DoH policy apply failed: {ex.Message}"); }
+                });
+
+            if (_config.BlockForeignDns)
+                _ = Task.Run(() =>
+                {
+                    try { _dnsLeak.Apply(_config.UpstreamDns); }
+                    catch (Exception ex) { Log.Error("Service", $"foreign DNS block failed: {ex.Message}"); }
+                });
         }
         else if (_config.AutoSetSystemDns && _proxy.ActivePort != DnsProxy.DefaultPort)
         {
@@ -116,9 +188,17 @@ public sealed class NetworkService : IAsyncDisposable
                 try { await _dnsMgr.RecoverStaleAsync(); }
                 catch (Exception ex) { Log.Error("Service", $"DNS rollback failed: {ex.Message}"); }
             });
+
+            if (DohGuard.HasPendingSnapshot())
+                _ = Task.Run(() => { try { _doh.Restore(); } catch { } });
+        }
+        else if (DohGuard.HasPendingSnapshot())
+        {
+            _ = Task.Run(() => { try { _doh.Restore(); } catch { } });
         }
 
         bool haveDb = _blocklist.DeferredMode ? _blocklist.HasDatabaseFile : _blocklist.IsLoaded;
+        if (ProfileChangedSinceLastDownload()) haveDb = false;
         _updateTimer = new Timer(_ => SafeUpdateUrls(),
             state: null,
             dueTime: haveDb ? TimeSpan.FromMinutes(5) : TimeSpan.FromSeconds(15),
@@ -132,6 +212,78 @@ public sealed class NetworkService : IAsyncDisposable
             $"Mode: {_config.Mode}.");
     }
 
+    private static readonly string ProfileMarkerPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "Malward", "data", "urls-profile.txt");
+
+    private bool ProfileChangedSinceLastDownload()
+    {
+        try
+        {
+            var want = _config.GetServerProfileName();
+            var have = File.Exists(ProfileMarkerPath) ? File.ReadAllText(ProfileMarkerPath).Trim() : "";
+            if (string.Equals(want, have, StringComparison.OrdinalIgnoreCase)) return false;
+            Log.Info("Update", $"URL database profile changed ({(have.Length > 0 ? have : "unknown")} -> {want}) "
+                               + "— downloading it now instead of waiting for the next cycle.");
+            return true;
+        }
+        catch { return false; }
+    }
+
+    private static void RememberProfile(string profile)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(ProfileMarkerPath)!);
+            File.WriteAllText(ProfileMarkerPath, profile);
+        }
+        catch { }
+    }
+
+    private void AdoptManualUpstreamDns()
+    {
+        try
+        {
+            if (!_config.AutoSetSystemDns) return;
+            var manual = SystemDnsManager.DetectManualUpstream();
+            if (string.IsNullOrWhiteSpace(manual)) return;
+            if (string.Equals(manual, _config.UpstreamDns, StringComparison.Ordinal)) return;
+
+            Log.Info("DnsMgr", $"This machine resolves through {manual}, set by hand — forwarding there "
+                               + $"instead of {_config.UpstreamDns} so local and company names keep working.");
+            _config.UpstreamDns = manual;
+        }
+        catch (Exception ex) { Log.Debug("DnsMgr", $"Adopting the manual DNS failed: {ex.Message}"); }
+    }
+
+    private Timer? _httpFilterRetry;
+
+    private void StartHttpFilterRetry()
+    {
+        Log.Warn("HttpFilter", "The address filter could not take its port — the browser proxy policy "
+                               + "stays as it is and the filter keeps retrying every 30 s.");
+        _httpFilterRetry?.Dispose();
+        _httpFilterRetry = new Timer(_ =>
+        {
+            if (_stopping || _httpFilter == null) return;
+            try
+            {
+                if (_httpFilter.IsRunning) { StopHttpFilterRetry(); return; }
+                if (!_httpFilter.Start(_config.HttpFilterPort)) return;
+                _browserProxy.Apply(_httpFilter.ActivePort);
+                Log.Info("HttpFilter", $"Address filter came up on 127.0.0.1:{_httpFilter.ActivePort}.");
+                StopHttpFilterRetry();
+            }
+            catch (Exception ex) { Log.Debug("HttpFilter", $"retry: {ex.Message}"); }
+        }, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+    }
+
+    private void StopHttpFilterRetry()
+    {
+        try { _httpFilterRetry?.Dispose(); } catch { }
+        _httpFilterRetry = null;
+    }
+
     private void SafeUpdateUrls()
     {
         _ = Task.Run(async () =>
@@ -141,6 +293,7 @@ public sealed class NetworkService : IAsyncDisposable
                 string profile = _config.GetServerProfileName();
                 Log.Info("Update", $"Downloading urls-{profile}.vdeb from server…");
                 bool ok = await _server.DownloadUrlsAsync(UrlsVdebTarget, profile);
+                if (ok) RememberProfile(profile);
 
                 if (ok && _blocklist.DeferredMode)
                 {
@@ -171,8 +324,40 @@ public sealed class NetworkService : IAsyncDisposable
             { Log.Error("Service", $"Auto-DNS restore failed: {ex.Message}"); }
         }
 
+        if (DohGuard.HasPendingSnapshot())
+        {
+            try { _doh.Restore(); } catch (Exception ex)
+            { Log.Error("Service", $"DoH policy restore failed: {ex.Message}"); }
+        }
+
+        try { _dnsLeak.Remove(); } catch (Exception ex)
+        { Log.Error("Service", $"removing the foreign DNS block failed: {ex.Message}"); }
+
+        if (!_config.Enabled || !_config.BlockQuic)
+        {
+            try { _quic.Remove(); } catch { }
+        }
+
+        if (_config.Enabled)
+        {
+            Log.Info("Service", "Browser proxy policy left in place — the module is only restarting "
+                              + "and a running browser would otherwise stop filtering until it is "
+                              + "restarted. The PAC falls back to DIRECT while nothing is listening.");
+        }
+        else
+        {
+            try { _browserProxy.Restore(); } catch (Exception ex)
+            { Log.Error("Service", $"restoring the browser proxy policy failed: {ex.Message}"); }
+        }
+
+        StopHttpFilterRetry();
+        try { _httpFilter?.Stop(); } catch { }
+        _httpFilter = null;
+
         try { _connMon?.Stop(); } catch { }
         _connMon = null;
+        try { _adBlock?.Stop(); } catch { }
+        _adBlock = null;
         try { _proxy?.Stop(); } catch { }
         _proxy = null;
         try { _tlsBlock?.Stop(); } catch { }

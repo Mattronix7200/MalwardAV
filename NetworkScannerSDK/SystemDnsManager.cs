@@ -32,6 +32,8 @@ public sealed class SystemDnsManager : IDisposable
 
     public Func<bool>? ShieldEnabled { get; set; }
 
+    public Action? OnStandDown { get; set; }
+
     private int _deadCycles;
 
     private const int DeadCyclesBeforeRollback = 5;
@@ -167,6 +169,7 @@ public sealed class SystemDnsManager : IDisposable
         _stopped = true;
         StopWatchdog();
         await RestoreCoreAsync(CancellationToken.None);
+        try { OnStandDown?.Invoke(); } catch (Exception ex) { Log.Warn("DnsMgr", ex.Message); }
         return true;
     }
 
@@ -586,6 +589,31 @@ public sealed class SystemDnsManager : IDisposable
             : string.Join(",", v4.Concat(v6)) + (s.Dhcp ? " (IPv4 automatic)" : "");
     }
 
+    public static string? DetectManualUpstream()
+    {
+        try
+        {
+            foreach (var source in new[] { LoadSnapshot(), ReadCurrentInterfaces() })
+            {
+                if (source == null) continue;
+                foreach (var entry in source)
+                {
+                    if (entry.Dhcp) continue;
+                    foreach (var addr in entry.DnsIpv4)
+                    {
+                        if (string.IsNullOrWhiteSpace(addr)) continue;
+                        if (IsLoopbackLiteral(addr)) continue;
+                        if (!IPAddress.TryParse(addr, out var ip)) continue;
+                        if (ip.AddressFamily != AddressFamily.InterNetwork) continue;
+                        return addr;
+                    }
+                }
+            }
+        }
+        catch (Exception ex) { Log.Debug("DnsMgr", $"Reading the manual DNS failed: {ex.Message}"); }
+        return null;
+    }
+
     private static List<IfaceSnapshot> ReadCurrentInterfaces()
     {
         var list = new List<IfaceSnapshot>();
@@ -667,8 +695,23 @@ public sealed class SystemDnsManager : IDisposable
         StopWatchdog();
     }
 
+    private static void AnnounceOwnChange()
+    {
+        try
+        {
+            var dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "Malward", "data");
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, "dns-intent"),
+                DateTime.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+        }
+        catch { }
+    }
+
     private static async Task<bool> RunPsAsync(string command, CancellationToken ct)
     {
+        AnnounceOwnChange();
         try
         {
             var psi = new ProcessStartInfo("powershell.exe")

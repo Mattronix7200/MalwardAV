@@ -1,3 +1,4 @@
+﻿using Malward.NetworkScanner.AdBlock;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
@@ -120,6 +121,9 @@ public sealed class BlockPageServer : IDisposable
                 src = info.Source;
             }
 
+            if (await AdStubResponse.TryWriteSubresourceAsync(ns, raw, host, AdStubResponse.ThreatMarker,
+                                                              CancellationToken.None)) return;
+
             if (!AcceptsHtml(raw))
             {
                 var msg = BuildShortBlockMessage(host, det);
@@ -176,7 +180,7 @@ public sealed class BlockPageServer : IDisposable
             ? DnsProxy.BuildDetectionName(host ?? "")
             : detection!;
         return
-            $"Polaczenie przerwane przez Malward(R) Community Edition.\n" +
+            $"Polaczenie przerwane przez Malward(R) Cloud Scanner.\n" +
             $"Wykryto zagrozenie: {det}\n" +
             $"Adres: {host}\n" +
             $"Strona zostala zablokowana jako szkodliwa lub niezaufana.\n";
@@ -352,156 +356,6 @@ public sealed class BlockPageServer : IDisposable
     }
 
 #if FALSE
-    private static string OBSOLETE_RenderBlockPage(string host, string? detection, string? source)
-    {
-        string safeHost = Escape(host);
-        string srcLabel = source switch
-        {
-            "live"  => "Wykryto na żywo przez serwer Malward",
-            "cloud" => "Skaner w chmurze",
-            "local" => "Wykryto przez lokalną bazę reputacji",
-            _       => "Wykryto przez osłonę sieciową Malward",
-        };
-        string detLabel = string.IsNullOrEmpty(detection)
-            ? Escape(DnsProxy.BuildDetectionName(safeHost))
-            : Escape(detection!);
-
-        var nowLocal = DateTime.Now;
-        string ts = nowLocal.ToString("yyyy-MM-dd HH:mm:ss");
-        string tsIso = nowLocal.ToString("yyyy-MM-ddTHH:mm:sszzz");
-
-        const string logoSvg =
-            "<svg viewBox=\"0 0 24 24\" width=\"34\" height=\"34\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">" +
-            "<path d=\"M12 3 L20 6 V11 C20 16 16.5 19.5 12 21 C7.5 19.5 4 16 4 11 V6 Z\"/>" +
-            "<path d=\"M8 14 L8 9 L12 12 L16 9 L16 14\"/></svg>";
-
-        return $@"<!DOCTYPE html>
-<html lang=""pl"">
-<head>
-<meta charset=""utf-8"">
-<title>Malward — strona zablokowana</title>
-<meta name=""viewport"" content=""width=device-width, initial-scale=1"">
-<style>
-  :root {{
-    color-scheme: light dark;
-    /* Light theme by default; dark is switched in via @media prefers-color-scheme. */
-    --bg-grad-from: #f6f8fc;
-    --bg-grad-to:   #e9eef5;
-    --card-bg:      #ffffff;
-    --card-border:  #d6dbe2;
-    --text:         #1a2030;
-    --text-dim:     #4b5563;
-    --text-mute:    #6a7280;
-    --note-bg:      rgba(226,59,59,.06);
-    --note-border:  rgba(226,59,59,.22);
-    --foot-border:  #e2e6ec;
-    --brand-fg:     #1a2030;
-    --shadow:       0 14px 50px rgba(20,30,50,.12);
-  }}
-  @media (prefers-color-scheme: dark) {{
-    :root {{
-      --bg-grad-from: #1c2330;
-      --bg-grad-to:   #0e1116;
-      --card-bg:      #161b22;
-      --card-border:  #2b333e;
-      --text:         #e9ecf0;
-      --text-dim:     #cfd5dc;
-      --text-mute:    #6a7280;
-      --note-bg:      rgba(226,59,59,.08);
-      --note-border:  rgba(226,59,59,.25);
-      --foot-border:  #2b333e;
-      --brand-fg:     #cfd5dc;
-      --shadow:       0 12px 50px rgba(0,0,0,.4);
-    }}
-  }}
-
-  html, body {{ height: 100%; }}
-  body {{
-    margin: 0; display: flex; align-items: center; justify-content: center;
-    background: linear-gradient(160deg, var(--bg-grad-from), var(--bg-grad-to));
-    font-family: 'Segoe UI', system-ui, -apple-system, Roboto, Arial, sans-serif;
-    color: var(--text);
-    padding: 24px;
-  }}
-  .card {{
-    width: 100%; max-width: 660px;
-    background: var(--card-bg);
-    border: 1px solid var(--card-border);
-    border-radius: 16px;
-    box-shadow: var(--shadow);
-    overflow: hidden;
-  }}
-  .head {{
-    background: linear-gradient(135deg, #c42b2b, #a31e1e);
-    padding: 22px 26px; color: #fff;
-    display: flex; align-items: center; gap: 14px;
-  }}
-  .head .logo {{ color: #fff; flex-shrink: 0; }}
-  .head .title {{ flex: 1; }}
-  .head h1 {{ margin: 0 0 4px 0; font-size: 22px; font-weight: 700; line-height: 1.2; }}
-  .head p  {{ margin: 0; font-size: 13.5px; opacity: .92; }}
-
-  .body {{ padding: 22px 28px 24px; }}
-  .row {{ margin-bottom: 14px; }}
-  .lbl {{ font-size: 12px; color: var(--text-mute); text-transform: uppercase; letter-spacing: .4px; }}
-  .val {{ font-size: 14.5px; font-weight: 600; word-break: break-all; margin-top: 4px; color: var(--text); }}
-  .det {{ color: #e23b3b; font-family: 'Segoe UI Mono', Consolas, monospace; font-size: 13.5px; }}
-
-  .note {{
-    margin-top: 18px; padding: 12px 14px; border-radius: 10px;
-    background: var(--note-bg); border: 1px solid var(--note-border);
-    font-size: 13px; color: var(--text-dim); line-height: 1.55;
-  }}
-
-  .foot {{
-    margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--foot-border);
-    font-size: 11.5px; color: var(--text-mute);
-    display: flex; justify-content: space-between; align-items: center; gap: 10px;
-    flex-wrap: wrap;
-  }}
-  .brand {{ font-weight: 700; color: var(--brand-fg); display: inline-flex; align-items: center; gap: 6px; }}
-  .brand .mini {{ color: var(--brand-fg); }}
-  .ts {{ font-family: 'Segoe UI Mono', Consolas, monospace; }}
-</style>
-</head>
-<body>
-  <main class=""card"" role=""alert"">
-    <div class=""head"">
-      <div class=""logo"">{logoSvg}</div>
-      <div class=""title"">
-        <h1>Strona zablokowana</h1>
-        <p>Osłona sieciowa Malward zablokowała dostęp do tej witryny.</p>
-      </div>
-    </div>
-    <div class=""body"">
-      <div class=""row"">
-        <div class=""lbl"">Adres URL</div>
-        <div class=""val"">{safeHost}</div>
-      </div>
-      <div class=""row"">
-        <div class=""lbl"">Detekcja</div>
-        <div class=""val det"">{detLabel}</div>
-      </div>
-      <div class=""row"">
-        <div class=""lbl"">Źródło</div>
-        <div class=""val"">{Escape(srcLabel)}</div>
-      </div>
-      <div class=""note"">
-        Strona została zaklasyfikowana jako szkodliwa lub niezaufana. Otwarcie jej może
-        prowadzić do wyłudzenia danych, pobrania złośliwego pliku albo śledzenia użytkownika.
-        Jeśli uważasz, że to fałszywy alarm, dodaj domenę do listy wyjątków w ustawieniach
-        osłony sieciowej w aplikacji Malward.
-      </div>
-      <div class=""foot"">
-        <span class=""brand""><span class=""mini"">{logoSvg.Replace("width=\"34\" height=\"34\"", "width=\"14\" height=\"14\"")}</span> Malward Community Edition</span>
-        <span>Wygenerowano: <time class=""ts"" datetime=""{Escape(tsIso)}"">{Escape(ts)}</time></span>
-      </div>
-    </div>
-  </main>
-</body>
-</html>";
-    }
-
     private static string Escape(string s)
         => s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
 #endif

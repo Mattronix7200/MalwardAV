@@ -28,11 +28,35 @@ public sealed class NetworkConfig
     [JsonPropertyName("ad_blocking")]
     public bool AdBlockingEnabled { get; set; } = false;
 
-    public string GetServerProfileName()
+    [JsonPropertyName("block_quic")]
+    public bool BlockQuic { get; set; } = true;
+
+    [JsonPropertyName("adblock_http_filter")]
+    public bool AdBlockHttpFilter { get; set; } = true;
+
+    [JsonPropertyName("adblock_cosmetic")]
+    public bool AdBlockCosmetic { get; set; } = true;
+
+    [JsonPropertyName("adblock_cosmetic_generic")]
+    public bool AdBlockCosmeticGeneric { get; set; } = true;
+
+    [JsonPropertyName("adblock_scriptlets")]
+    public bool AdBlockScriptlets { get; set; } = true;
+
+    [JsonPropertyName("adblock_youtube")]
+    public bool AdBlockYouTube { get; set; } = true;
+
+    [JsonPropertyName("adblock_stealth")]
+    public bool AdBlockStealth { get; set; } = true;
+
+    public string GetServerProfileName() => NormalizeProfile(SensitivityProfile);
+
+    public static string NormalizeProfile(string? profile)
     {
-        var lvl = (SensitivityProfile ?? "medium").ToLowerInvariant();
+        var lvl = (profile ?? "medium").Trim().ToLowerInvariant();
+        if (lvl.EndsWith("-ads", StringComparison.Ordinal)) lvl = lvl[..^4];
         if (lvl != "low" && lvl != "medium" && lvl != "high") lvl = "medium";
-        return AdBlockingEnabled ? lvl + "-ads" : lvl;
+        return lvl;
     }
 
     [JsonPropertyName("exclusions")]
@@ -79,6 +103,24 @@ public sealed class NetworkConfig
 
     [JsonPropertyName("auto_set_system_dns")]
     public bool AutoSetSystemDns { get; set; } = true;
+
+    [JsonPropertyName("block_doh")]
+    public bool BlockDoh { get; set; } = true;
+
+    [JsonPropertyName("block_foreign_dns")]
+    public bool BlockForeignDns { get; set; } = true;
+
+    [JsonPropertyName("http_filter")]
+    public bool HttpFilter { get; set; } = true;
+
+    [JsonPropertyName("http_filter_port")]
+    public int HttpFilterPort { get; set; } = 8119;
+
+    [JsonPropertyName("deep_scan_per_minute")]
+    public int DeepScanPerMinute { get; set; } = 10;
+
+    [JsonPropertyName("deep_scan_per_hour")]
+    public int DeepScanPerHour { get; set; } = 120;
 
     [JsonPropertyName("low_memory")]
     public bool LowMemory { get; set; } = true;

@@ -374,6 +374,156 @@ public sealed class UrlBlocklist : IDisposable
         return false;
     }
 
+    public bool HasPathRules(string host)
+    {
+        foreach (var form in HostForms(host))
+        {
+            var prefix = PathPrefix(form);
+            if (prefix == null) continue;
+            int i = LowerBound(prefix);
+            if (i >= 0 && StartsWithAt(i, prefix)) return true;
+        }
+        return false;
+    }
+
+    public bool IsBlockedUrl(string host, string? path, out string? matchedEntry)
+    {
+        matchedEntry = null;
+        foreach (var form in HostForms(host))
+            if (MatchesPathRule(form, path, out matchedEntry)) return true;
+        return false;
+    }
+
+    private static IEnumerable<string> HostForms(string host)
+    {
+        if (string.IsNullOrEmpty(host)) yield break;
+        var h = host.ToLowerInvariant().TrimStart('.').TrimEnd('.');
+        if (h.Length == 0) yield break;
+        yield return h;
+        if (h.StartsWith("www.", StringComparison.Ordinal)) yield return h[4..];
+    }
+
+    private bool MatchesPathRule(string host, string? path, out string? matchedEntry)
+    {
+        matchedEntry = null;
+        var prefix = PathPrefix(host);
+        if (prefix == null) return false;
+
+        int first = LowerBound(prefix);
+        if (first < 0 || !StartsWithAt(first, prefix)) return false;
+
+        var stem = prefix[..^1];
+        foreach (var candidate in PathCandidates(NormalizePath(path)))
+        {
+            var record = stem + candidate;
+            if (BinarySearch(record)) { matchedEntry = record; return true; }
+        }
+        return false;
+    }
+
+    private static IEnumerable<string> PathCandidates(string target)
+    {
+        yield return target;
+
+        int query = target.IndexOf('?');
+        var path = query < 0 ? target : target[..query];
+        if (query >= 0 && path.Length > 0) yield return path;
+
+        for (int i = path.Length - 1; i >= 0; i--)
+        {
+            if (path[i] != '/') continue;
+            yield return path[..(i + 1)];
+            if (i > 0) yield return path[..i];
+        }
+    }
+
+    private static string? PathPrefix(string host)
+    {
+        if (string.IsNullOrEmpty(host)) return null;
+        var h = host.ToLowerInvariant().TrimStart('.').TrimEnd('.');
+        if (h.Length == 0 || !h.Contains('.')) return null;
+        return h + "/";
+    }
+
+    private static string NormalizePath(string? path)
+    {
+        if (string.IsNullOrEmpty(path)) return "/";
+        var p = path!;
+        int cut = p.IndexOf('#');
+        if (cut >= 0) p = p[..cut];
+        if (p.Length == 0) return "/";
+        return p[0] == '/' ? p : "/" + p;
+    }
+
+    private int LowerBound(string needle)
+    {
+        int[] offs;
+        lock (_lock) { offs = _offsets; }
+        if (offs.Length == 0) return -1;
+
+        var needleBytes = Encoding.UTF8.GetBytes(needle);
+        int lo = 0, hi = offs.Length;
+        while (lo < hi)
+        {
+            int mid = (lo + hi) >>> 1;
+            if (CompareRecordTo(mid, needleBytes) < 0) lo = mid + 1; else hi = mid;
+        }
+        return lo;
+    }
+
+    private int CompareRecordTo(int index, ReadOnlySpan<byte> needle)
+    {
+        byte[] blob; int[] offs; FileStream? fs;
+        lock (_lock) { blob = _blob; offs = _offsets; fs = _datFs; }
+        if (index < 0 || index >= offs.Length) return 1;
+
+        if (fs == null) return CompareAtOffset(blob, offs[index], needle);
+
+        var bytes = ReadRecordBytes(fs, offs[index]);
+        return CompareNullTerm(bytes, needle);
+    }
+
+    private static byte[] ReadRecordBytes(FileStream fs, long offset)
+    {
+        var buffer = new byte[512];
+        while (true)
+        {
+            int n;
+            lock (fs)
+            {
+                fs.Position = offset;
+                n = fs.Read(buffer, 0, buffer.Length);
+            }
+            for (int i = 0; i < n; i++)
+                if (buffer[i] == 0) return buffer[..i];
+
+            if (n < buffer.Length || buffer.Length >= 8192) return buffer[..n];
+            buffer = new byte[buffer.Length * 2];
+        }
+    }
+
+    private bool StartsWithAt(int index, string prefix)
+    {
+        var record = RecordAt(index);
+        return record != null && record.StartsWith(prefix, StringComparison.Ordinal);
+    }
+
+    private string? RecordAt(int index)
+    {
+        byte[] blob; int[] offs; FileStream? fs;
+        lock (_lock) { blob = _blob; offs = _offsets; fs = _datFs; }
+        if (index < 0 || index >= offs.Length) return null;
+
+        if (fs == null)
+        {
+            int start = offs[index], end = start;
+            while (end < blob.Length && blob[end] != 0) end++;
+            return Encoding.UTF8.GetString(blob, start, end - start);
+        }
+
+        return Encoding.UTF8.GetString(ReadRecordBytes(fs, offs[index]));
+    }
+
     private bool BinarySearch(string needle)
     {
         byte[] blob; int[] offs; FileStream? fs;

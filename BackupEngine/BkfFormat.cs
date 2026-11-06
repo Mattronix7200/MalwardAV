@@ -6,14 +6,15 @@ public static class BkfFormat
 {
     public const uint Magic = 0x4B42574D;
 
-    public const ushort Version = 2;
+    public const ushort Version = 3;
 
     public const ushort FlagEncrypted    = 0x0001;
     public const ushort FlagCompressed   = 0x0002;
     public const ushort FlagHashDedup    = 0x0004;
 
     public const int HeaderSize = 32;
-    public const int IndexEntrySize = 37;
+    public const int IndexEntrySize = 41;
+    public const int IndexEntrySizeV2 = 37;
     public const int NonceSize = 12;
     public const int TagSize = 16;
     public const int Sha256Size = 32;
@@ -69,7 +70,7 @@ public static class BkfFormat
         public Guid SnapId { get; init; }
         public long Timestamp { get; init; }
         public long Offset { get; init; }
-        public uint Size { get; init; }
+        public long Size { get; init; }
         public Trigger Trig { get; init; }
 
         public byte[] Serialize()
@@ -78,14 +79,27 @@ public static class BkfFormat
             SnapId.TryWriteBytes(buf.AsSpan(0, 16));
             BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(16, 8), Timestamp);
             BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(24, 8), Offset);
-            BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(32, 4), Size);
-            buf[36] = (byte)Trig;
+            BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(32, 8), Size);
+            buf[40] = (byte)Trig;
             return buf;
         }
 
         public static IndexEntry Deserialize(ReadOnlySpan<byte> buf)
         {
             if (buf.Length < IndexEntrySize) throw new InvalidDataException("Truncated index entry.");
+            return new IndexEntry
+            {
+                SnapId = new Guid(buf.Slice(0, 16)),
+                Timestamp = BinaryPrimitives.ReadInt64LittleEndian(buf.Slice(16, 8)),
+                Offset = BinaryPrimitives.ReadInt64LittleEndian(buf.Slice(24, 8)),
+                Size = BinaryPrimitives.ReadInt64LittleEndian(buf.Slice(32, 8)),
+                Trig = (Trigger)buf[40],
+            };
+        }
+
+        public static IndexEntry DeserializeV2(ReadOnlySpan<byte> buf)
+        {
+            if (buf.Length < IndexEntrySizeV2) throw new InvalidDataException("Truncated index entry.");
             return new IndexEntry
             {
                 SnapId = new Guid(buf.Slice(0, 16)),

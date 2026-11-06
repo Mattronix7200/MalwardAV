@@ -11,6 +11,26 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        int capture = Array.IndexOf(args, "--capture");
+        if (capture >= 0 && capture + 1 < args.Length)
+        {
+            Log.MinLevel = LogLevel.Info;
+            Log.FileLoggingEnabled = false;
+            int captured = await Diagnostics.CaptureAsync(args[capture + 1], Diagnostics.ParsePort(args));
+            Log.Shutdown();
+            return captured;
+        }
+
+        int diagnose = Array.IndexOf(args, "--diagnose");
+        if (diagnose >= 0 && diagnose + 1 < args.Length)
+        {
+            Log.MinLevel = LogLevel.Info;
+            Log.FileLoggingEnabled = false;
+            int code = await Diagnostics.RunAsync(args[diagnose + 1], Diagnostics.ParsePort(args));
+            Log.Shutdown();
+            return code;
+        }
+
         if (Environment.UserInteractive)
         {
             ShowInteractiveRefusal();

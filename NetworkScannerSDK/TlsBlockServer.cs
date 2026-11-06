@@ -1,3 +1,4 @@
+using Malward.NetworkScanner.AdBlock;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -97,6 +98,7 @@ public sealed class TlsBlockServer : IDisposable
                 EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
                 ClientCertificateRequired = false,
                 AllowRenegotiation = false,
+                ApplicationProtocols = new List<SslApplicationProtocol> { SslApplicationProtocol.Http11 },
                 ServerCertificateSelectionCallback = (sender, name) =>
                 {
                     sniHost = name ?? "unknown";
@@ -117,6 +119,10 @@ public sealed class TlsBlockServer : IDisposable
             string html;
             {
                 var (det, src) = _lookup(host);
+
+                if (await AdStubResponse.TryWriteSubresourceAsync(ssl, headers, host,
+                                                                  AdStubResponse.ThreatMarker,
+                                                                  CancellationToken.None)) return;
 
                 if (!BlockPageServer.AcceptsHtml(headers))
                 {

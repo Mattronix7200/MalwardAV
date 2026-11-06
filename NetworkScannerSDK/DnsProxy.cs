@@ -1,5 +1,6 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Malward.NetworkScanner;
@@ -72,6 +73,7 @@ public sealed class DnsProxy : IDisposable
             IsBackground = true, Name = "DNS-Recv",
         };
         _loop.Start();
+        FlushSystemDnsCache("proxy start");
         Log.Info("DNS", $"DNS proxy active on 127.0.0.1:{_activePort}, upstream={_config.UpstreamDns}");
     }
 
@@ -79,11 +81,34 @@ public sealed class DnsProxy : IDisposable
     {
         try { _cts?.Cancel(); } catch { }
         try { _udp?.Close(); _udp?.Dispose(); } catch { }
+        FlushSystemDnsCache("proxy stop");
         _udp = null;
         try { _loop?.Join(2000); } catch { }
         _loop = null;
         _cts?.Dispose();
         _cts = null;
+    }
+
+    private const int UdpConnectionReset = -1744830452;
+
+    internal static void IgnoreConnectionReset(Socket socket)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try { socket.IOControl((IOControlCode)UdpConnectionReset, new byte[4], null); }
+        catch (Exception ex) { Log.Debug("DNS", $"SIO_UDP_CONNRESET: {ex.Message}"); }
+    }
+
+    [DllImport("dnsapi.dll", EntryPoint = "DnsFlushResolverCache")]
+    private static extern uint DnsFlushResolverCache();
+
+    private static void FlushSystemDnsCache(string when)
+    {
+        try
+        {
+            uint rc = DnsFlushResolverCache();
+            Log.Info("DNS", $"system resolver cache flushed ({when}), result={rc}");
+        }
+        catch (Exception ex) { Log.Debug("DNS", $"resolver cache flush failed: {ex.Message}"); }
     }
 
     private UdpClient? TryBind(int port)
@@ -92,6 +117,7 @@ public sealed class DnsProxy : IDisposable
         {
             var ep = new IPEndPoint(IPAddress.Loopback, port);
             var u = new UdpClient(ep);
+            IgnoreConnectionReset(u.Client);
             _activePort = port;
             return u;
         }
@@ -149,11 +175,33 @@ public sealed class DnsProxy : IDisposable
                 return;
             }
 
+            if (_config.BlockDoh && DohGuard.IsDohEndpoint(domain))
+            {
+                string? who = null;
+                try { who = ProcessResolver.ResolveUdpProcess(req.RemoteEndPoint.Port); } catch { }
+                Log.Info("DNS", $"encrypted DNS resolver refused: {domain} ({who ?? "?"})");
+                var refused = BuildNxDomain(req.Buffer);
+                if (refused != null) await udp.SendAsync(refused, refused.Length, req.RemoteEndPoint);
+                return;
+            }
+
             string? proc = null;
             try { proc = ProcessResolver.ResolveUdpProcess(req.RemoteEndPoint.Port); }
             catch { }
 
             try { _lolBin.TryReportLolBinQuery(proc, domain); } catch { }
+
+            if (_adBlock != null && _adBlock.IsBlockedDomainForDns(domain, out var adList))
+            {
+                string adDet = AdDetectionName(adList);
+                _activity.ReportBlock(domain, detection: adDet, source: "adblock", process: proc,
+                                      list: adList);
+                _blockPage?.NoteBlocked(domain, adDet, "adblock");
+                Log.Debug("DNS", $"ad list match: {domain} <- list '{adList}'  proc={proc ?? "?"}");
+                var adResp = BuildBlockResponse(req.Buffer);
+                if (adResp != null) await udp.SendAsync(adResp, adResp.Length, req.RemoteEndPoint);
+                return;
+            }
 
             bool cloudMode = string.Equals(_config.Mode, "local+cloud", StringComparison.OrdinalIgnoreCase);
 
@@ -186,7 +234,7 @@ public sealed class DnsProxy : IDisposable
 
             if (cloudMode)
             {
-                string verdict = await GetCloudVerdictCachedAsync(domain, ct);
+                string verdict = await GetCloudVerdictCachedAsync(domain, DeepScanWait, ct);
                 if (string.Equals(verdict, "malware", StringComparison.OrdinalIgnoreCase))
                 {
                     string det = BuildDetectionName(domain);
@@ -240,7 +288,224 @@ public sealed class DnsProxy : IDisposable
         return ready;
     }
 
-    private async Task<string> GetCloudVerdictCachedAsync(string domain, CancellationToken ct)
+
+    private static readonly string[] InfrastructureSuffixes =
+    {
+        "microsoft.com", "windows.com", "windowsupdate.com", "msftconnecttest.com", "msftncsi.com",
+        "msedge.net", "office.com", "office.net", "live.com", "bing.com", "azureedge.net",
+        "google.com", "googleapis.com", "gstatic.com", "googleusercontent.com", "youtube.com",
+        "ytimg.com", "doubleclick.net", "cloudflare.com", "cloudflare.net", "cloudflare-dns.com",
+        "akamai.net", "akamaiedge.net", "akamaized.net", "akadns.net", "edgesuite.net",
+        "fbcdn.net", "facebook.com", "instagram.com", "apple.com", "icloud.com", "mzstatic.com",
+        "mozilla.org", "mozilla.net", "mozilla.com", "digicert.com", "verisign.com", "sectigo.com",
+        "letsencrypt.org", "globalsign.com", "entrust.net", "pki.goog", "amazonaws.com",
+        "cloudfront.net", "nvidia.com", "steampowered.com", "steamcontent.com", "steamstatic.com",
+        "in-addr.arpa", "ip6.arpa", "localhost", "local", "lan", "home", "internal",
+    };
+
+    private static bool IsInfrastructure(string domain)
+    {
+        foreach (var suffix in InfrastructureSuffixes)
+            if (domain.Equals(suffix, StringComparison.OrdinalIgnoreCase)
+                || domain.EndsWith("." + suffix, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    private static readonly TimeSpan DeepScanWait = TimeSpan.FromMilliseconds(600);
+    private static readonly TimeSpan DeepScanRemember = TimeSpan.FromMinutes(30);
+
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>
+        _deepScanned = new(StringComparer.OrdinalIgnoreCase);
+
+    private int _deepScanTokens;
+    private long _deepScanWindow;
+
+
+
+    private long _deepScanHourWindow;
+    private int _deepScanHourTokens;
+
+    private bool TakeDeepScanToken()
+    {
+        long minute = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute;
+        if (Interlocked.Exchange(ref _deepScanWindow, minute) != minute)
+            Interlocked.Exchange(ref _deepScanTokens, 0);
+
+        long hour = DateTime.UtcNow.Ticks / TimeSpan.TicksPerHour;
+        if (Interlocked.Exchange(ref _deepScanHourWindow, hour) != hour)
+            Interlocked.Exchange(ref _deepScanHourTokens, 0);
+
+        int perMinute = Math.Max(1, _config.DeepScanPerMinute);
+        int perHour = Math.Max(perMinute, _config.DeepScanPerHour);
+
+        if (Interlocked.Increment(ref _deepScanHourTokens) > perHour) return false;
+        return Interlocked.Increment(ref _deepScanTokens) <= perMinute;
+    }
+
+    private bool ShouldDeepScan(string key)
+    {
+        if (IsInfrastructure(key)) return false;
+
+        var now = DateTime.UtcNow;
+        if (_deepScanned.TryGetValue(key, out var when) && now - when < DeepScanRemember) return false;
+        if (_deepScanned.Count > VerdictCacheCap)
+            foreach (var kv in _deepScanned)
+                if (now - kv.Value > DeepScanRemember) _deepScanned.TryRemove(kv);
+
+        _deepScanned[key] = now;
+        return TakeDeepScanToken();
+    }
+
+    private async Task<bool> DeepScanAsync(string domain, string key)
+    {
+        try
+        {
+            var r = await _server.UrlScanAsync("http://" + domain, CancellationToken.None);
+            if (r == null) return false;
+            if (!string.Equals(r.Verdict, "malware", StringComparison.OrdinalIgnoreCase)) return false;
+
+            _verdictCache[key] = ("malware", DateTime.UtcNow.Add(VerdictCacheTtl));
+            Log.Alert("DNS", $"cloud scan: {domain} is DANGEROUS "
+                             + $"(source={r.Source ?? "-"}, vendor={r.Vendor ?? "-"})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _deepScanned.TryRemove(key, out _);
+            Log.Debug("DNS", $"cloud /url/scan {domain} failed: {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static readonly TimeSpan HttpVerdictWait = TimeSpan.FromSeconds(8);
+
+    private AdBlock.AdBlockService? _adBlock;
+
+    public void AttachAdBlock(AdBlock.AdBlockService? adBlock) => _adBlock = adBlock;
+
+    private static string AdDetectionName(string list)
+    {
+        var l = (list ?? "").ToLowerInvariant();
+        if (l.Contains("phish")) return "Phishing.List";
+        if (l.Contains("malware") || l.Contains("badware") || l.Contains("urlhaus")
+            || l.Contains("botnet") || l.Contains("ransom")) return "Malware.List";
+        if (l.Contains("scam") || l.Contains("fraud") || l.Contains("fake")) return "Scam.List";
+        if (l.Contains("track") || l.Contains("privacy") || l.Contains("spy")
+            || l.Contains("telemetr")) return "Tracking.Blocked";
+        if (l.Contains("coin") || l.Contains("crypto") || l.Contains("mining")) return "CoinMiner.List";
+        return "Ads.Blocked";
+    }
+
+    private static readonly TimeSpan InspectedVerdictWait = TimeSpan.FromMilliseconds(400);
+
+    public Task<(bool Blocked, string? Detection, string? Source)> VerdictForHttpAsync(
+        string host, CancellationToken ct) => VerdictForHttpAsync(host, null, false, ct);
+
+    public Task<(bool Blocked, string? Detection, string? Source)> VerdictForHttpAsync(
+        string host, bool inspected, CancellationToken ct)
+        => VerdictForHttpAsync(host, null, inspected, ct);
+
+    public bool HasPathRules(string host)
+    {
+        try
+        {
+            var domain = HostPart(host);
+            if (domain.Length == 0 || _config.IsExcluded(domain)) return false;
+            if (!_config.IsCloudUrlOnly && _blocklist.HasPathRules(domain)) return true;
+            return _urlCache is { IsLoaded: true } && _urlCache.HasPathRules(domain);
+        }
+        catch { return false; }
+    }
+
+    private static string HostPart(string host)
+    {
+        string domain = host ?? "";
+        int colon = domain.LastIndexOf(':');
+        if (colon > 0 && !domain.Contains(']')) domain = domain[..colon];
+        return domain.Trim().TrimEnd('.').ToLowerInvariant();
+    }
+
+    public (bool Blocked, string? Detection, string? Source) PathVerdict(string host, string? path)
+    {
+        if (path == null) return (false, null, null);
+
+        string domain = HostPart(host);
+        if (domain.Length == 0) return (false, null, null);
+
+        try
+        {
+            if (_config.IsExcluded(domain)) return (false, null, null);
+
+            if (!_config.IsCloudUrlOnly && _blocklist.IsBlockedUrl(domain, path, out var hit))
+            {
+                Log.Info("HttpFilter", $"address record match: {hit}");
+                return (true, BuildDetectionName(hit ?? domain), "local");
+            }
+
+            if (_urlCache is { IsLoaded: true }
+                && _urlCache.IsBlockedUrl(domain, path, out var cachedHit))
+            {
+                Log.Info("HttpFilter", $"address record match: {cachedHit}");
+                return (true, BuildDetectionName(cachedHit ?? domain), "cloud");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("HttpFilter", $"address verdict for {domain}: {ex.GetType().Name}: {ex.Message}");
+        }
+        return (false, null, null);
+    }
+
+    public async Task<(bool Blocked, string? Detection, string? Source)> VerdictForHttpAsync(
+        string host, string? path, bool inspected, CancellationToken ct)
+    {
+        string domain = HostPart(host);
+        if (domain.Length == 0) return (false, null, null);
+
+        try
+        {
+            if (_config.IsExcluded(domain)) return (false, null, null);
+
+            if (!_config.IsCloudUrlOnly && _blocklist.IsBlocked(domain, out _))
+                return (true, BuildDetectionName(domain), "local");
+
+            if (_urlCache is { IsLoaded: true } && _urlCache.IsBlocked(domain, out _))
+                return (true, BuildDetectionName(domain), "cloud");
+
+            if (path != null)
+            {
+                if (!_config.IsCloudUrlOnly && _blocklist.IsBlockedUrl(domain, path, out var hit))
+                {
+                    Log.Info("HttpFilter", $"address record match: {hit}");
+                    return (true, BuildDetectionName(hit ?? domain), "local");
+                }
+
+                if (_urlCache is { IsLoaded: true }
+                    && _urlCache.IsBlockedUrl(domain, path, out var cachedHit))
+                {
+                    Log.Info("HttpFilter", $"address record match: {cachedHit}");
+                    return (true, BuildDetectionName(cachedHit ?? domain), "cloud");
+                }
+            }
+
+            string verdict = await GetCloudVerdictCachedAsync(
+                domain, inspected ? InspectedVerdictWait : HttpVerdictWait, ct);
+            if (string.Equals(verdict, "malware", StringComparison.OrdinalIgnoreCase))
+                return (true, BuildDetectionName(domain), "cloud");
+
+            if (verdict == VerdictUnavailable && FallbackDatabaseReady()
+                                              && _blocklist.IsBlocked(domain, out _))
+                return (true, BuildDetectionName(domain), "local");
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("HttpFilter", $"verdict for {domain}: {ex.GetType().Name}: {ex.Message}");
+        }
+        return (false, null, null);
+    }
+
+    private async Task<string> GetCloudVerdictCachedAsync(string domain, TimeSpan deepWait, CancellationToken ct)
     {
         var key = domain.ToLowerInvariant();
 
@@ -269,6 +534,14 @@ public sealed class DnsProxy : IDisposable
 
             if (_verdictCache.Count > VerdictCacheCap) PruneVerdictCache();
             Log.Debug("DNS", $"cloud /url {domain}: verdict={verdict} source={r?.Source ?? "-"}");
+
+            if (verdict == "unknown" && ShouldDeepScan(key))
+            {
+                var deep = DeepScanAsync(domain, key);
+                var finished = await Task.WhenAny(deep, Task.Delay(deepWait, ct));
+                if (ReferenceEquals(finished, deep) && deep.Result) verdict = "malware";
+            }
+
             tcs.TrySetResult(verdict);
             return verdict;
         }
@@ -324,6 +597,7 @@ public sealed class DnsProxy : IDisposable
             if (string.IsNullOrWhiteSpace(upstream)) upstream = "1.1.1.1";
 
             using var client = new UdpClient();
+            IgnoreConnectionReset(client.Client);
             client.Client.ReceiveTimeout = 2000;
             await client.SendAsync(req.Buffer, req.Buffer.Length, upstream, 53);
 

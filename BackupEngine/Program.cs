@@ -140,18 +140,29 @@ public static class Program
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
 
     public static string CancelFlagPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "Malward", "data", "backup-cancel");
+
+    public static string LegacyCancelFlagPath => Path.Combine(
         Path.GetDirectoryName(BackupConfig.DefaultConfigPath)!, "backup-cancel");
+
+    private static bool CancelRequested()
+    {
+        try { if (File.Exists(CancelFlagPath)) return true; } catch { }
+        try { return File.Exists(LegacyCancelFlagPath); } catch { return false; }
+    }
 
     private static int RunBackupWithProgress(BackupRunner runner, BkfFormat.Trigger trigger, bool pace)
     {
         try { File.Delete(CancelFlagPath); } catch { }
+        try { File.Delete(LegacyCancelFlagPath); } catch { }
 
         if (pace) BackupPacing.EnterBackgroundMode();
 
         using var cts = new CancellationTokenSource();
         using var watch = new Timer(_ =>
         {
-            try { if (File.Exists(CancelFlagPath)) cts.Cancel(); } catch { }
+            if (CancelRequested()) cts.Cancel();
         }, null, 500, 500);
 
         long lastReport = 0;
@@ -181,6 +192,7 @@ public static class Program
         {
             if (pace) BackupPacing.LeaveBackgroundMode();
             try { File.Delete(CancelFlagPath); } catch { }
+            try { File.Delete(LegacyCancelFlagPath); } catch { }
         }
     }
 

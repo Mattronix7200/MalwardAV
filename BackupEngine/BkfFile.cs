@@ -73,20 +73,95 @@ internal sealed class BkfFile : IDisposable
             throw new InvalidDataException($"Header too short ({n} < {HeaderSize}).");
         _header = Header.Deserialize(hbuf);
 
-        if (_header.SnapCount > 0 && _header.IndexOffset > 0 && _header.IndexOffset < _fs.Length)
+        _index.Clear();
+        foreach (var entry in ReadIndex(_fs, _header))
         {
-            _fs.Position = _header.IndexOffset;
-            var idxBuf = new byte[(int)_header.SnapCount * IndexEntrySize];
-            _fs.Read(idxBuf, 0, idxBuf.Length);
-            _index.Clear();
-            for (int i = 0; i < (int)_header.SnapCount; i++)
+            if (!EntryLooksSane(entry, _fs.Length))
             {
-                _index.Add(IndexEntry.Deserialize(
-                    idxBuf.AsSpan(i * IndexEntrySize, IndexEntrySize)));
+                Log.Warn("BKF", $"Index entry {entry.SnapId} of {_path} is not usable - skipped "
+                                + "(the file is probably being written right now).");
+                continue;
             }
+            _index.Add(entry);
         }
 
+        if (_header.Version < BkfFormat.Version && !readOnly) UpgradeIndexLayout();
+
         Log.Debug("BKF", $"Opened {_path}: snapshots={_index.Count}, size={_fs.Length:N0} B");
+    }
+
+    private static List<IndexEntry> ReadIndex(FileStream fs, Header header)
+    {
+        var entries = new List<IndexEntry>();
+        if (header.SnapCount == 0 || header.IndexOffset <= 0 || header.IndexOffset >= fs.Length)
+            return entries;
+
+        bool legacy = header.Version < BkfFormat.Version;
+        int entrySize = legacy ? IndexEntrySizeV2 : IndexEntrySize;
+        var buf = new byte[(int)header.SnapCount * entrySize];
+        fs.Position = header.IndexOffset;
+        fs.ReadExactly(buf, 0, buf.Length);
+
+        for (int i = 0; i < (int)header.SnapCount; i++)
+            entries.Add(legacy
+                ? IndexEntry.DeserializeV2(buf.AsSpan(i * entrySize, entrySize))
+                : IndexEntry.Deserialize(buf.AsSpan(i * entrySize, entrySize)));
+
+        if (legacy) RestoreSizesLostTo32Bits(entries, header.IndexOffset);
+        return entries;
+    }
+
+    private static void RestoreSizesLostTo32Bits(List<IndexEntry> entries, long indexOffset)
+    {
+        var order = Enumerable.Range(0, entries.Count).OrderBy(i => entries[i].Offset).ToList();
+        for (int k = 0; k < order.Count; k++)
+        {
+            int at = order[k];
+            long end = k + 1 < order.Count ? entries[order[k + 1]].Offset : indexOffset;
+            long real = end - entries[at].Offset;
+            if (real <= 0 || real == entries[at].Size) continue;
+            if ((real & 0xFFFFFFFFL) != entries[at].Size) continue;
+
+            Log.Warn("BKF", $"Snapshot {entries[at].SnapId} carried a 32-bit size - "
+                            + $"restored {real:N0} B in place of {entries[at].Size:N0} B.");
+            entries[at] = entries[at] with { Size = real };
+        }
+    }
+
+    private void UpgradeIndexLayout()
+    {
+        if (_fs == null) return;
+        try
+        {
+            long indexOffset = _index.Count > 0 ? _header.IndexOffset : HeaderSize;
+            _fs.Position = indexOffset;
+            foreach (var ix in _index) _fs.Write(ix.Serialize(), 0, IndexEntrySize);
+            _fs.SetLength(indexOffset + (long)_index.Count * IndexEntrySize);
+
+            _header = _header with
+            {
+                Version = BkfFormat.Version,
+                SnapCount = (uint)_index.Count,
+                IndexOffset = indexOffset,
+            };
+            _fs.Position = 0;
+            _fs.Write(_header.Serialize(), 0, HeaderSize);
+            _fs.Flush(true);
+            Log.Info("BKF", $"{_path}: index upgraded to format v{BkfFormat.Version} "
+                            + $"({_index.Count} snapshot(s)).");
+        }
+        catch (Exception ex) { Log.Warn("BKF", $"Index upgrade failed: {ex.Message}"); }
+    }
+
+    private static bool EntryLooksSane(IndexEntry e, long fileLength)
+    {
+        if (e.SnapId == Guid.Empty) return false;
+        if (!Enum.IsDefined(typeof(Trigger), e.Trig)) return false;
+        if (e.Offset < HeaderSize || e.Offset >= fileLength) return false;
+        if (e.Size == 0 || e.Offset + e.Size > fileLength) return false;
+
+        long ms = e.Timestamp > 100_000_000_000L ? e.Timestamp : e.Timestamp * 1000;
+        return ms >= 1_262_304_000_000L && ms <= 4_102_444_800_000L;
     }
 
     private void CreateEmpty()
@@ -127,7 +202,7 @@ internal sealed class BkfFile : IDisposable
         {
             if (_fs == null) throw new InvalidOperationException("BKF not open.");
 
-            chunksStartOffset = _header.IndexOffset;
+            chunksStartOffset = Math.Max(_header.IndexOffset, _fs.Length);
             _fs.Position = chunksStartOffset;
         }
 
@@ -142,6 +217,11 @@ internal sealed class BkfFile : IDisposable
             try { info = new FileInfo(path); if (!info.Exists) continue; }
             catch { continue; }
             if (info.Length > maxFileSizeBytes) continue;
+            if (info.Length >= uint.MaxValue)
+            {
+                Log.Warn("BKF", $"skip {path}: {info.Length:N0} B exceeds the 4 GB limit of a single chunk.");
+                continue;
+            }
 
             try
             {
@@ -233,7 +313,7 @@ internal sealed class BkfFile : IDisposable
                 SnapId = snapId,
                 Timestamp = ts,
                 Offset = chunksStartOffset,
-                Size = (uint)(chunkOffsetInArea + metaEnvelope.Length + 4),
+                Size = chunkOffsetInArea + metaEnvelope.Length + 4,
                 Trig = trigger,
             };
             _index.Add(newEntry);
@@ -352,7 +432,7 @@ internal sealed class BkfFile : IDisposable
         }
 
         long snapStart = entry.Offset;
-        uint snapTotalSize = entry.Size;
+        long snapTotalSize = entry.Size;
         long trailerOffset = snapStart + snapTotalSize - 4;
 
         byte[] metaEnvelope;
@@ -532,15 +612,7 @@ internal sealed class BkfFile : IDisposable
         var hbuf = new byte[HeaderSize];
         if (src.Read(hbuf, 0, HeaderSize) < HeaderSize) throw new InvalidDataException("Mini-BKF header truncated.");
         var srcHeader = Header.Deserialize(hbuf);
-        var srcIndex = new List<IndexEntry>();
-        if (srcHeader.SnapCount > 0)
-        {
-            src.Position = srcHeader.IndexOffset;
-            var idxBuf = new byte[(int)srcHeader.SnapCount * IndexEntrySize];
-            src.Read(idxBuf, 0, idxBuf.Length);
-            for (int i = 0; i < (int)srcHeader.SnapCount; i++)
-                srcIndex.Add(IndexEntry.Deserialize(idxBuf.AsSpan(i * IndexEntrySize, IndexEntrySize)));
-        }
+        var srcIndex = ReadIndex(src, srcHeader);
 
         int imported = 0;
         lock (_lock)
@@ -584,14 +656,7 @@ internal sealed class BkfFile : IDisposable
         _fs.Position = 0; _fs.Read(hbuf, 0, HeaderSize);
         _header = Header.Deserialize(hbuf);
         _index.Clear();
-        if (_header.SnapCount > 0 && _header.IndexOffset > 0)
-        {
-            _fs.Position = _header.IndexOffset;
-            var idxBuf = new byte[(int)_header.SnapCount * IndexEntrySize];
-            _fs.Read(idxBuf, 0, idxBuf.Length);
-            for (int i = 0; i < (int)_header.SnapCount; i++)
-                _index.Add(IndexEntry.Deserialize(idxBuf.AsSpan(i * IndexEntrySize, IndexEntrySize)));
-        }
+        _index.AddRange(ReadIndex(_fs, _header));
     }
 
     public void Dispose()
