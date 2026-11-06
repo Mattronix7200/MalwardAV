@@ -33,6 +33,27 @@ public sealed class QuarantineStore
             }
         }
         else CreateEmpty();
+
+        PruneOrphanPayloads();
+    }
+
+    /// <summary>Encrypted copies whose index entry never made it to disk. They are invisible to
+    /// the manager, count against the size limit and get scanned like any other file, so they go
+    /// as soon as the store opens.</summary>
+    private void PruneOrphanPayloads()
+    {
+        try
+        {
+            var known = new HashSet<string>(_entries.Select(e => $"{e.Id:N}.bin"),
+                                            StringComparer.OrdinalIgnoreCase);
+            foreach (var file in Directory.GetFiles(_payloadDir, "*.bin"))
+            {
+                if (known.Contains(Path.GetFileName(file))) continue;
+                try { File.Delete(file); }
+                catch { }
+            }
+        }
+        catch { }
     }
 
     private void BackupCorruptAndReset(string reason)
@@ -91,19 +112,41 @@ public sealed class QuarantineStore
                 Id = id,
                 OriginalPath = sourcePath,
                 Size = (ulong)plain.LongLength,
-                Sha256 = Convert.FromHexString(sha256Hex),
+                Sha256 = HashBytes(sha256Hex, plain),
                 Detection = detection,
                 QuarantinedTs = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                 Iv = iv,
                 PayloadSize = (ulong)(iv.Length + ct.Length),
             };
             _entries.Add(entry);
-            RewriteQb();
+
+            // A half-added entry would stay in the list and make the index unwritable, so every
+            // later file would fail to quarantine too - one bad record used to poison the store
+            // for the rest of the session.
+            try { RewriteQb(); }
+            catch
+            {
+                _entries.Remove(entry);
+                try { File.Delete(payload); } catch { }
+                throw;
+            }
 
             EnforceSizeLimit();
 
             return id;
         }
+    }
+
+    /// <summary>The index stores the digest as raw bytes. A caller that has no usable hex string
+    /// must not take the quarantine down with it - the bytes are right here.</summary>
+    private static byte[] HashBytes(string? sha256Hex, byte[] content)
+    {
+        if (!string.IsNullOrEmpty(sha256Hex) && sha256Hex.Length == 64)
+        {
+            try { return Convert.FromHexString(sha256Hex); }
+            catch (FormatException) { }
+        }
+        return SHA256.HashData(content);
     }
 
     public long TotalSize()

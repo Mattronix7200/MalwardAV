@@ -34,13 +34,17 @@ public sealed class ServerClient : IDisposable
 
         [property: JsonPropertyName("label")]       string? Label = null,
         [property: JsonPropertyName("vt_detected")] int? VtDetected = null,
-        [property: JsonPropertyName("vt_total")]    int? VtTotal = null);
+        [property: JsonPropertyName("vt_total")]    int? VtTotal = null,
+        [property: JsonPropertyName("in_vps")]      bool? InVps = null,
+        [property: JsonPropertyName("vps_name")]    string? VpsName = null,
+        [property: JsonPropertyName("fp_votes")]    int? FpVotes = null);
 
     public sealed record FileMeta(
         [property: JsonPropertyName("sha256")]      string? Sha256,
         [property: JsonPropertyName("size")]        long Size,
         [property: JsonPropertyName("version_ts")]  long VersionTs,
-        [property: JsonPropertyName("available")]   bool Available);
+        [property: JsonPropertyName("available")]   bool Available,
+        [property: JsonPropertyName("version")]     string? Version = null);
 
     public sealed record Manifest(
         [property: JsonPropertyName("vps")]        FileMeta Vps,
@@ -220,8 +224,8 @@ public sealed class ServerClient : IDisposable
             {
                 string why = await resp.Content.ReadAsStringAsync(ct);
                 throw new InvalidOperationException(
-                    $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}; serwer odpowiedzial: {why.Trim()}; " +
-                    $"PSK klienta fingerprint={PskFingerprint()}, ts={ts}");
+                    $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}; server replied: {why.Trim()}; " +
+                    $"client PSK fingerprint={PskFingerprint()}, ts={ts}");
             }
             var body = await resp.Content.ReadFromJsonAsync<AuthTokenResp>(cancellationToken: ct)
                 ?? throw new InvalidOperationException("auth/token: pusta odpowiedź");
@@ -236,7 +240,7 @@ public sealed class ServerClient : IDisposable
 
     public static string PskFingerprint()
     {
-        if (!ClientSecrets.HasPsk) return "BRAK";
+        if (!ClientSecrets.HasPsk) return "none";
         byte[] h = SHA256.HashData(Encoding.UTF8.GetBytes(ClientSecrets.AuthPsk));
         return Convert.ToHexString(h)[..8].ToLowerInvariant();
     }
@@ -251,10 +255,14 @@ public sealed class ServerClient : IDisposable
         => CertPinning.Validate(cert, errors, _settings.ServerCertPinSha256,
                                 m => Console.Error.WriteLine("[!] " + m));
 
-    public async Task<HashResponse> HashLookupAsync(string sha256, CancellationToken ct = default)
+    public async Task<HashResponse> HashLookupAsync(string sha256, string? md5 = null,
+                                                    CancellationToken ct = default)
     {
+        var body = string.IsNullOrEmpty(md5)
+            ? (object)new { sha256 }
+            : new { sha256, md5 = md5!.ToLowerInvariant() };
         using var resp = await SendAuthedAsync(
-            () => _http.PostAsJsonAsync("hash", new { sha256 }, ct), ct);
+            () => _http.PostAsJsonAsync("hash", body, ct), ct);
         await ThrowOnErrorAsync(resp, ct);
         return (await resp.Content.ReadFromJsonAsync<HashResponse>(cancellationToken: ct))!;
     }
@@ -310,24 +318,26 @@ public sealed class ServerClient : IDisposable
     public async Task<ScanResponse> ScanFileAsync(string filePath, int scanLevel, VirusTotalOptions? vt,
                                                   CancellationToken ct = default,
                                                   Action<long, long>? onProgress = null,
-                                                  bool unlimited = false)
+                                                  bool unlimited = false,
+                                                  bool verifyDetection = false)
     {
         await EnsureAuthAsync(ct);
         int generation = Volatile.Read(ref _authGeneration);
         try
         {
-            return await ScanFileCoreAsync(filePath, scanLevel, vt, ct, onProgress, unlimited);
+            return await ScanFileCoreAsync(filePath, scanLevel, vt, ct, onProgress, unlimited, verifyDetection);
         }
         catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Unauthorized)
         {
             await RefreshAuthAsync(generation, ct);
-            return await ScanFileCoreAsync(filePath, scanLevel, vt, ct, onProgress, unlimited);
+            return await ScanFileCoreAsync(filePath, scanLevel, vt, ct, onProgress, unlimited, verifyDetection);
         }
     }
 
     private async Task<ScanResponse> ScanFileCoreAsync(string filePath, int scanLevel,
                                                        VirusTotalOptions? vt, CancellationToken ct,
-                                                       Action<long, long>? onProgress, bool unlimited)
+                                                       Action<long, long>? onProgress, bool unlimited,
+                                                       bool verifyDetection = false)
     {
         using var content = new MultipartFormDataContent();
         await using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -343,6 +353,7 @@ public sealed class ServerClient : IDisposable
         fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
         content.Add(fileContent, "file", Path.GetFileName(filePath));
         content.Add(new StringContent(scanLevel.ToString()), "scan_level");
+        if (verifyDetection) content.Add(new StringContent("1"), "verify");
         if (vt != null)
         {
             content.Add(new StringContent(vt.Enabled ? "1" : "0"), "vt");

@@ -55,6 +55,15 @@ public sealed class Settings
     [JsonPropertyName("cloud_verify_detections")]
     public bool CloudVerifyDetections { get; set; } = true;
 
+    [JsonPropertyName("cloud_rescan_detections")]
+    public bool CloudRescanDetections { get; set; } = true;
+
+    [JsonPropertyName("cloud_rescan_max_mb")]
+    public int CloudRescanMaxMb { get; set; } = 64;
+
+    [JsonPropertyName("cloud_rescan_budget")]
+    public int CloudRescanBudget { get; set; } = 50;
+
     [JsonPropertyName("scan_optimization")]
     public bool ScanOptimization { get; set; } = true;
 
@@ -64,8 +73,7 @@ public sealed class Settings
     [JsonPropertyName("scan_cpu_limit_percent")]
     public int ScanCpuLimitPercent { get; set; } = 50;
 
-    [JsonPropertyName("trust_whitelist")]
-    public bool TrustWhitelist { get; set; } = true;
+
 
     [JsonPropertyName("skip_ms_signed")]
     public bool SkipMsSigned { get; set; } = false;

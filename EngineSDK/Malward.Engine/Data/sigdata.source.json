@@ -567,7 +567,20 @@
     "reg.gpo_scripts\u001fLocalMachine\u001fSoftware\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\Scripts\\Startup\u001f*\u001f*\u001f\u001fr",
     "reg.gpo_scripts\u001fLocalMachine\u001fSoftware\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\Scripts\\Shutdown\u001f*\u001f*\u001f\u001fr",
     "reg.gpo_scripts\u001fCurrentUser\u001fSoftware\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\Scripts\\Logon\u001f*\u001f*\u001f\u001fr",
-    "reg.gpo_scripts\u001fCurrentUser\u001fSoftware\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\Scripts\\Logoff\u001f*\u001f*\u001f\u001fr"
+    "reg.gpo_scripts\u001fCurrentUser\u001fSoftware\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\Scripts\\Logoff\u001f*\u001f*\u001f\u001fr",
+    "reg.dll_loadpoints\u001fLocalMachine\u001fSoftware\\Classes\\PROTOCOLS\\Filter\u001f*\u001f*\u001f\u001fs",
+    "reg.dll_loadpoints\u001fLocalMachine\u001fSoftware\\Classes\\PROTOCOLS\\Handler\u001f*\u001f*\u001f\u001fs",
+    "reg.dll_loadpoints\u001fCurrentUser\u001fSoftware\\Classes\\PROTOCOLS\\Filter\u001f*\u001f*\u001f\u001fs",
+    "reg.dll_loadpoints\u001fCurrentUser\u001fSoftware\\Classes\\PROTOCOLS\\Handler\u001f*\u001f*\u001f\u001fs",
+    "reg.dll_loadpoints\u001fCurrentUser\u001fSoftware\\Microsoft\\Ctf\\LangBarAddin\u001f*\u001f*\u001f\u001fs",
+    "reg.dll_loadpoints\u001fLocalMachine\u001fSoftware\\Microsoft\\Ctf\\LangBarAddin\u001f*\u001f*\u001f\u001fs",
+    "reg.dll_loadpoints\u001fLocalMachine\u001fSoftware\\Microsoft\\Windows NT\\CurrentVersion\\Accessibility\u001f*\u001f*\u001f\u001f",
+    "reg.dll_loadpoints\u001fLocalMachine\u001fSoftware\\Microsoft\\Windows NT\\CurrentVersion\\Accessibility\\ATs\u001f*\u001f*\u001f\u001fs",
+    "reg.file_assoc\u001fLocalMachine\u001fSoftware\\Microsoft\\Windows\\CurrentVersion\\URL\\DefaultPrefix\u001f*\u001f*\u001f\u001f",
+    "reg.file_assoc\u001fLocalMachine\u001fSoftware\\Microsoft\\Windows\\CurrentVersion\\URL\\Prefixes\u001f*\u001f*\u001f\u001f",
+    "reg.file_assoc\u001fLocalMachine\u001fSoftware\\Clients\\StartMenuInternet\u001f*\u001f*\u001f\u001f",
+    "reg.driver_blocklist\u001fLocalMachine\u001fSoftware\\Microsoft\\Driver Signing\u001f*\u001f*\u001f\u001f",
+    "reg.driver_blocklist\u001fLocalMachine\u001fSoftware\\Policies\\Microsoft\\Windows NT\\Driver Signing\u001f*\u001f*\u001f\u001f"
   ],
   "security_reg_keys": [
     "Microsoft\\Windows Defender",

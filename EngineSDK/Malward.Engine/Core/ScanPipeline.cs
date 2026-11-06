@@ -105,7 +105,7 @@ public sealed class ScanPipeline : IDisposable
         }
         else
         {
-            Console.WriteLine("[!] vps.vdeb not found — local lookup disabled. Run `malscan.exe update`.");
+            Console.WriteLine("[!] vps.vdeb not found — local lookup disabled. Update the databases first.");
         }
 
         var wlPath = Paths.WhitelistVdebReadable;
@@ -128,6 +128,71 @@ public sealed class ScanPipeline : IDisposable
 
     public const string UnverifiedSource = "VPS-unverified";
 
+    public const string RescanCleanSource = "VPS→Cloud-scan-clean";
+
+    public const string RescanMalwareSource = "VPS+Cloud-scan";
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _rescanMemo = new();
+
+    private static int _rescansUsed;
+
+    private static long _rescanWindowStart = Environment.TickCount64;
+
+    private bool TakeRescanBudget()
+    {
+        long now = Environment.TickCount64;
+        if (now - Interlocked.Read(ref _rescanWindowStart) > 3_600_000)
+        {
+            Interlocked.Exchange(ref _rescanWindowStart, now);
+            Interlocked.Exchange(ref _rescansUsed, 0);
+        }
+        return Interlocked.Increment(ref _rescansUsed) <= Math.Max(1, _settings.CloudRescanBudget);
+    }
+
+    private DetectionResult? CloudRescanDetection(string filePath, string sha, long size,
+                                                  string displayPath, string det, Stopwatch sw,
+                                                  bool realtime)
+    {
+        if (!_settings.CloudRescanDetections || !_settings.CloudVerifyDetections) return null;
+        if (_cloud == null) return null;
+
+        if (!_rescanMemo.TryGetValue(sha, out var verdict))
+        {
+            if (realtime) return null;
+
+            long cap = (long)Math.Max(1, _settings.CloudRescanMaxMb) * 1024 * 1024;
+            if (size > cap) return null;
+            if (!TakeRescanBudget()) return null;
+            try
+            {
+                Status?.State("weryfikacja detekcji (skan w chmurze)", displayPath);
+                var r = _cloud.ScanFileAsync(filePath, _settings.ScanLevel, null,
+                                             default, null, false, verifyDetection: true)
+                              .GetAwaiter().GetResult();
+                verdict = (r?.Verdict ?? "").ToLowerInvariant();
+                if (verdict.Length > 0) _rescanMemo[sha] = verdict;
+
+                if (verdict == "clean")
+                    Console.Error.WriteLine(
+                        $"[i] {displayPath}: the database flagged this file, the cloud engines "
+                        + $"found nothing (votes: {r?.FpVotes?.ToString() ?? "-"}) — treated as clean");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[!] detection rescan failed for {filePath}: {ex.Message}");
+                return null;
+            }
+        }
+
+        if (verdict == "clean")
+            return new DetectionResult(filePath, sha, Verdict.Clean, null,
+                RescanCleanSource, size, sw.ElapsedMilliseconds);
+        if (verdict == "malware")
+            return new DetectionResult(filePath, sha, Verdict.Malware, det,
+                RescanMalwareSource, size, sw.ElapsedMilliseconds);
+        return null;
+    }
+
     public const string ByodSource = "VulnerableDriver";
 
     public const string OversizedSource = "Oversized-container";
@@ -148,12 +213,12 @@ public sealed class ScanPipeline : IDisposable
 
     private static readonly int[] VerifyBackoffMs = { 400, 1200, 3000 };
 
-    private ServerClient.HashResponse VerifyWithRetry(string sha)
+    private ServerClient.HashResponse VerifyWithRetry(string sha, string? md5)
     {
         Exception? last = null;
         for (int attempt = 0; attempt < VerifyBackoffMs.Length; attempt++)
         {
-            try { return _cloud!.HashLookupAsync(sha).GetAwaiter().GetResult(); }
+            try { return _cloud!.HashLookupAsync(sha, md5).GetAwaiter().GetResult(); }
             catch (ServerClient.CloudThrottledException ex)
             {
                 last = ex;
@@ -381,7 +446,7 @@ public sealed class ScanPipeline : IDisposable
                     ByodSource, size, sw.ElapsedMilliseconds);
             }
 
-            if (!willExpandArchive && !ignoreWhitelist && _settings.TrustWhitelist && WhitelistHit(md5, sha))
+            if (!willExpandArchive && !ignoreWhitelist && WhitelistHit(md5, sha))
                 return new DetectionResult(filePath, sha, Verdict.Clean, null,
                     "Whitelist", size, sw.ElapsedMilliseconds);
 
@@ -406,12 +471,14 @@ public sealed class ScanPipeline : IDisposable
                 if (_settings.CloudVerifyDetections && _cloud != null)
                 {
                     bool verified = false;
+                    string hashVerdict = "";
                     try
                     {
                         Status?.State("VPS verify (cloud /hash)", displayPath);
-                        var vpsHash = VerifyWithRetry(sha);
+                        var vpsHash = VerifyWithRetry(sha, md5);
                         verified = true;
-                        if (vpsHash.Verdict == "clean")
+                        hashVerdict = vpsHash.Verdict ?? "";
+                        if (hashVerdict == "clean")
                         {
                             const int CLIENT_AUTO_TTL_DAYS = 30;
                             bool staleAuto = vpsHash.Source == "auto"
@@ -423,20 +490,22 @@ public sealed class ScanPipeline : IDisposable
                                     "VPS→Cloud-hash-clean", size, sw.ElapsedMilliseconds);
                             }
                         }
-                        else if (vpsHash.Verdict == "malware")
-                        {
-                            return new DetectionResult(filePath, sha, Verdict.Malware, det,
-                                "VPS+Cloud", size, sw.ElapsedMilliseconds);
-                        }
                     }
                     catch (Exception ex)
                     {
                         Console.Error.WriteLine($"[!] VPS verify via cloud failed for {filePath}: {ex.Message}");
                     }
 
+                    var rescanned = CloudRescanDetection(filePath, sha, size, displayPath, det, sw, realtime);
+                    if (rescanned != null) return rescanned;
+
                     if (!verified)
                         return new DetectionResult(filePath, sha, Verdict.Malware, det,
                             UnverifiedSource, size, sw.ElapsedMilliseconds);
+
+                    if (hashVerdict == "malware")
+                        return new DetectionResult(filePath, sha, Verdict.Malware, det,
+                            "VPS+Cloud", size, sw.ElapsedMilliseconds);
                 }
 
                 return new DetectionResult(filePath, sha, Verdict.Malware, det, "VPS", size, sw.ElapsedMilliseconds);
@@ -490,7 +559,7 @@ public sealed class ScanPipeline : IDisposable
                 Status?.State("cloud /hash", displayPath);
                 try
                 {
-                    hr = _cloud.HashLookupAsync(sha).GetAwaiter().GetResult();
+                    hr = _cloud.HashLookupAsync(sha, md5).GetAwaiter().GetResult();
                     if (hr.Verdict == "malware")
                     {
                         var cloudName = DetectionNames.Normalize(hr.Name);
@@ -581,16 +650,16 @@ public sealed class ScanPipeline : IDisposable
 
             if (heurYaraEnabled && !isTrustedSigned && !isGenuineSystem && !HasExt(filePath, HeuristicSkipExts))
             {
-                Status?.State("heur YARA", displayPath);
+                Status?.State("heuristics", displayPath);
                 var yac = EnsureHeurYacExtracted();
                 if (yac != null)
                 {
                     var hres = _heurRunner.Scan(yac, filePath);
                     if (hres.Detected && !string.IsNullOrEmpty(hres.RuleName))
                     {
-                        if (isSystem) return SystemFalsePositive(filePath, sha, size, sw, "Heur:YARA", HeurMalwareName(sha), "Heur:YARA");
+                        if (isSystem) return SystemFalsePositive(filePath, sha, size, sw, "Heur.Generic", HeurMalwareName(sha), "Heur.Generic");
                         var name = HeurMalwareName(sha);
-                        return new DetectionResult(filePath, sha, Verdict.Malware, name, "Heur:YARA", size, sw.ElapsedMilliseconds);
+                        return new DetectionResult(filePath, sha, Verdict.Malware, name, "Heur.Generic", size, sw.ElapsedMilliseconds);
                     }
                     if (hres.Error != null)
                         Console.Error.WriteLine($"[!] heur for {filePath}: {hres.Error}");
@@ -636,7 +705,7 @@ public sealed class ScanPipeline : IDisposable
                 source ?? srcStage, size, sw.ElapsedMilliseconds);
         }
 
-        Console.Error.WriteLine($"[i] System file false-positive @ {srcStage} — auto-whitelist: {filePath}");
+        Console.Error.WriteLine($"[i] Skipping verified file: {filePath}");
         if (_cloud != null && !string.IsNullOrEmpty(sha))
         {
             _ = Task.Run(() => _cloud.SubmitCleanAsync(sha));

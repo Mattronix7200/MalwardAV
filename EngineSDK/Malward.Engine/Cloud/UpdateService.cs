@@ -12,6 +12,15 @@ public sealed class UpdateService : IDisposable
 
     private enum DeltaOutcome { UpToDate, AppliedDelta, NeedFull }
 
+    /// <summary>Component, phase (checking/downloading/updated/current) and 0..1 progress within the component.
+    /// Optional: callers that only read the console output leave it null.</summary>
+    public Action<string, string, double>? Progress;
+
+    private void Report(string component, string phase, double pct)
+    {
+        try { Progress?.Invoke(component, phase, pct); } catch { }
+    }
+
     public UpdateService(Settings settings)
     {
         _settings = settings;
@@ -35,13 +44,51 @@ public sealed class UpdateService : IDisposable
             updated += await UpdateDbAsync("vps", "update/vps", Paths.VpsVdeb,
                 "vps-overlay.txt", manifest.Vps.Sha256, dbi?.Vps, seqStore, ct);
         if (manifest.Heur.Available)
-            updated += await DownloadIfChanged("update/heur", Paths.HeurVdeb, manifest.Heur.Sha256, ct);
+            updated += await DownloadIfChanged("heur", "update/heur", Paths.HeurVdeb, manifest.Heur.Sha256, ct);
         if (manifest.Whitelist.Available)
             updated += await UpdateDbAsync("whitelist", "update/whitelist", Paths.WhitelistVdeb,
                 "rf-whitelist-overlay.txt", manifest.Whitelist.Sha256, dbi?.Whitelist, seqStore, ct);
 
         SaveSeqStore(seqStore);
+
+        StoreVersions(new Dictionary<string, string?>
+        {
+            ["vps"]       = dbi?.Vps?.Version,
+            ["whitelist"] = dbi?.Whitelist?.Version,
+            ["heur"]      = manifest.Heur.Version,
+        });
+
         return updated;
+    }
+
+    /// <summary>Keeps the database build numbers where every front end reads them from.</summary>
+    private static void StoreVersions(IDictionary<string, string?> values)
+    {
+        try
+        {
+            var path = Path.Combine(Paths.DataDir, "db-versions-server.json");
+            var o = new JsonObject();
+            try
+            {
+                if (File.Exists(path) && JsonNode.Parse(File.ReadAllText(path)) is JsonObject current)
+                    o = current;
+            }
+            catch { }
+
+            bool changed = false;
+            foreach (var pair in values)
+            {
+                if (string.IsNullOrWhiteSpace(pair.Value)) continue;
+                if (o[pair.Key]?.GetValue<string>() == pair.Value) continue;
+                o[pair.Key] = pair.Value;
+                changed = true;
+            }
+            if (!changed) return;
+
+            Directory.CreateDirectory(Paths.DataDir);
+            File.WriteAllText(path, o.ToJsonString());
+        }
+        catch { }
     }
 
     private async Task<int> UpdateDbAsync(string db, string endpoint, string destPath,
@@ -50,11 +97,12 @@ public sealed class UpdateService : IDisposable
     {
         string overlayPath = Path.Combine(Paths.DataDir, overlayName);
 
+        Report(db, "checking", 0);
         var outcome = await TryDeltaAsync(db, destPath, overlayPath, info, seqStore, ct);
-        if (outcome == DeltaOutcome.AppliedDelta) return 1;
-        if (outcome == DeltaOutcome.UpToDate)     return 0;
+        if (outcome == DeltaOutcome.AppliedDelta) { Report(db, "updated", 1); return 1; }
+        if (outcome == DeltaOutcome.UpToDate)     { Report(db, "current", 1); return 0; }
 
-        int n = await DownloadIfChanged(endpoint, destPath, remoteSha, ct);
+        int n = await DownloadIfChanged(db, endpoint, destPath, remoteSha, ct);
 
         if (info != null)
         {
@@ -148,12 +196,15 @@ public sealed class UpdateService : IDisposable
         try { if (File.Exists(overlayPath)) File.Delete(overlayPath); } catch { }
     }
 
-    private async Task<int> DownloadIfChanged(string endpoint, string destPath, string? remoteSha, CancellationToken ct)
+    private async Task<int> DownloadIfChanged(string component, string endpoint, string destPath,
+                                              string? remoteSha, CancellationToken ct)
     {
         var name = Path.GetFileName(destPath);
+        Report(component, "checking", 0);
         if (string.IsNullOrEmpty(remoteSha))
         {
             Console.WriteLine($"[!] {name}: brak sha256 w manifeście — pomijam");
+            Report(component, "current", 1);
             return 0;
         }
         if (File.Exists(destPath))
@@ -162,6 +213,7 @@ public sealed class UpdateService : IDisposable
             if (string.Equals(localSha, remoteSha, StringComparison.OrdinalIgnoreCase))
             {
                 Console.WriteLine($"[+] {name}: aktualne (sha256 match)");
+                Report(component, "current", 1);
                 return 0;
             }
             Console.WriteLine($"[*] {name}: zmiana detected (lokalnie {localSha[..12]}…, zdalnie {remoteSha[..12]}…)");
@@ -170,8 +222,12 @@ public sealed class UpdateService : IDisposable
         {
             Console.WriteLine($"[*] {name}: brak lokalnie — pobieram");
         }
-        await _client.DownloadAsync(endpoint, destPath, ct);
+
+        Report(component, "downloading", 0);
+        await _client.DownloadAsync(endpoint, destPath,
+            (done, total) => Report(component, "downloading", total > 0 ? (double)done / total : 0), ct);
         Console.WriteLine($"[+] {name}: zaktualizowano");
+        Report(component, "updated", 1);
         return 1;
     }
 

@@ -22,6 +22,7 @@ namespace MalwardSandbox
             Console.WriteLine("====================================================");
 
             var opt = SandboxOptions.Parse(args);
+            StatusPath = opt.StatusPath;
 
             string? binRoot = ResolveBinRoot(opt.BinDir);
             if (binRoot == null)
@@ -31,16 +32,23 @@ namespace MalwardSandbox
                 return 2;
             }
 
+            string dataRoot  = ResolveDataRoot(opt.DataDir, binRoot);
             string qemuExe   = Path.Combine(binRoot, "qemu", "qemu-system-x86_64.exe");
-            string diskDir   = Path.Combine(binRoot, "disk");
-            string sharedDir = Path.Combine(binRoot, "shared");
+            string diskDir   = Path.Combine(dataRoot, "disk");
+            string sharedDir = Path.Combine(dataRoot, "shared");
             string qcow2Path = Path.Combine(diskDir, "default.qcow2");
             string seed7z    = Path.Combine(sharedDir, "default.7z");
+            if (!File.Exists(seed7z))
+            {
+                string legacy = Path.Combine(binRoot, "shared", "default.7z");
+                if (File.Exists(legacy)) seed7z = legacy;
+            }
             string isoPath   = Path.Combine(Path.GetTempPath(), $"mw-sbox-{Guid.NewGuid():N}.iso");
 
             string? sevenZip = ResolveSevenZip(binRoot, opt.SevenZip);
 
             Console.WriteLine($"[INFO] bin:    {binRoot}");
+            Console.WriteLine($"[INFO] data:   {dataRoot}");
             Console.WriteLine($"[INFO] qemu:   {qemuExe}");
             Console.WriteLine($"[INFO] 7-Zip:  {sevenZip ?? "(NIE ZNALEZIONO)"}");
             Console.WriteLine($"[INFO] seed:   {seed7z}");
@@ -125,6 +133,34 @@ namespace MalwardSandbox
                 Console.ReadKey();
             }
             return 0;
+        }
+
+        static string ResolveDataRoot(string? requested, string binRoot)
+        {
+            if (!string.IsNullOrWhiteSpace(requested))
+            {
+                try
+                {
+                    string full = Path.GetFullPath(requested);
+                    Directory.CreateDirectory(Path.Combine(full, "shared"));
+                    Directory.CreateDirectory(Path.Combine(full, "disk"));
+                    return full;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Katalog danych {requested} jest niedostępny ({ex.Message}).");
+                }
+            }
+
+            string shared = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "Malward", "sandbox");
+            try
+            {
+                if (File.Exists(Path.Combine(shared, "shared", "default.7z"))) return shared;
+            }
+            catch { }
+            return binRoot;
         }
 
         static Process LaunchQemu(string qemuExe, string binRoot, SandboxOptions opt,
@@ -259,8 +295,11 @@ namespace MalwardSandbox
             try { if (File.Exists(iso))   File.Delete(iso);   } catch (Exception ex) { Console.WriteLine("  iso: " + ex.Message); }
         }
 
+        static string? StatusPath;
+
         static void Fail(string msg, bool interactive)
         {
+            WriteStatus(StatusPath, "error", msg);
             Console.WriteLine("BŁĄD: " + msg);
             if (interactive) { Console.WriteLine("\nNaciśnij dowolny klawisz…"); try { Console.ReadKey(); } catch { } }
         }
@@ -304,6 +343,7 @@ namespace MalwardSandbox
         public string Accel = "auto";
         public string? StatusPath;
         public string? BinDir;
+        public string? DataDir;
         public string? SevenZip;
         public bool Interactive;
 
@@ -336,6 +376,7 @@ namespace MalwardSandbox
                         }
                     case "--status": o.StatusPath = Val(i++); break;
                     case "--bin": o.BinDir = Val(i++); break;
+                    case "--data": o.DataDir = Val(i++); break;
                     case "--sevenzip": o.SevenZip = Val(i++); break;
                 }
             }

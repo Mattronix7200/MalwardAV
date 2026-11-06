@@ -121,6 +121,33 @@ public sealed class ArchiveScanner
 
     public delegate Core.DetectionResult ArchiveScanFn(string tempPath, string displayPath);
 
+    /// <summary>7-Zip happily opens a plain executable and lists its sections and resources as
+    /// members. Hashing those against the signature database is meaningless - a cursor or a
+    /// .rdata blob can collide with anything - and it has already cost a real file. Self-extracting
+    /// installers are reported under their real format (Nsis, 7z, Zip, Cab), so only the raw image
+    /// formats are turned away here.</summary>
+    private static bool IsExecutableImageType(string? type)
+        => type is not null
+        && (type.Equals("PE", StringComparison.OrdinalIgnoreCase)
+         || type.Equals("COFF", StringComparison.OrdinalIgnoreCase)
+         || type.Equals("TE", StringComparison.OrdinalIgnoreCase)
+         || type.Equals("ELF", StringComparison.OrdinalIgnoreCase)
+         || type.Equals("MachO", StringComparison.OrdinalIgnoreCase));
+
+    private static readonly HashSet<string> PeSectionNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".text", ".rdata", ".data", ".rsrc", ".reloc", ".pdata", ".idata", ".edata",
+        ".tls", ".didat", ".bss", ".crt", ".gfids", ".00cfg", ".voltbl", ".sxdata",
+        ".textbss", ".detourc", ".detourd", ".rodata", ".debug", "CERTIFICATE",
+    };
+
+    private static bool LooksLikePeMember(string entryPath)
+    {
+        var head = entryPath.Replace('/', Path.DirectorySeparatorChar)
+                            .Split(Path.DirectorySeparatorChar)[0];
+        return PeSectionNames.Contains(head);
+    }
+
     private readonly record struct EntryInfo(string Path, long Size);
 
     public ArchiveResult ScanArchive(string archivePath, ArchiveScanFn scanFn, int timeoutSec = 300,
@@ -138,12 +165,17 @@ public sealed class ArchiveScanner
             if (viaLib != null) return viaLib;
         }
 
-        var (entries, listError, headerEncrypted) = ListEntries(sevenZip, archivePath, timeoutSec);
+        var (entries, listError, headerEncrypted, archiveType) =
+            ListEntries(sevenZip, archivePath, timeoutSec);
         if (headerEncrypted)
             return new ArchiveResult(false, Array.Empty<ArchiveEntryFinding>(),
                 "Archive is encrypted", PasswordProtected: true);
+        if (IsExecutableImageType(archiveType))
+            return new ArchiveResult(false, Array.Empty<ArchiveEntryFinding>(), null);
         if (entries == null)
             return new ArchiveResult(false, Array.Empty<ArchiveEntryFinding>(), listError);
+
+        entries = entries.Where(e => !LooksLikePeMember(e.Path)).ToList();
 
         var workRoot = Paths.WorkingDir;
         try { Directory.CreateDirectory(workRoot); }
@@ -224,7 +256,7 @@ public sealed class ArchiveScanner
         return new ArchiveResult(findings.Count > 0, findings, error, Expanded: true);
     }
 
-    private static (List<EntryInfo>? Entries, string? Error, bool HeaderEncrypted)
+    private static (List<EntryInfo>? Entries, string? Error, bool HeaderEncrypted, string? Type)
         ListEntries(string sevenZip, string archivePath, int timeoutSec)
     {
         try
@@ -247,7 +279,7 @@ public sealed class ArchiveScanner
             if (!p.WaitForExit(Math.Max(10, timeoutSec) * 1000))
             {
                 try { p.Kill(true); } catch { }
-                return (null, "Listing timeout", false);
+                return (null, "Listing timeout", false, null);
             }
             string sout = outTask.GetAwaiter().GetResult();
             string serr = errTask.GetAwaiter().GetResult();
@@ -255,7 +287,7 @@ public sealed class ArchiveScanner
             {
                 bool enc = serr.IndexOf("Wrong password", StringComparison.OrdinalIgnoreCase) >= 0
                         || serr.IndexOf("encrypted", StringComparison.OrdinalIgnoreCase) >= 0;
-                return (null, $"7z l rc={p.ExitCode}: {serr.Trim()}", enc);
+                return (null, $"7z l rc={p.ExitCode}: {serr.Trim()}", enc, null);
             }
 
             var list = new List<EntryInfo>();
@@ -266,6 +298,7 @@ public sealed class ArchiveScanner
                 path = null; size = 0; isDir = false;
             }
 
+            string? archiveType = null;
             bool inEntries = false;
             foreach (var raw in sout.Split('\n'))
             {
@@ -273,6 +306,9 @@ public sealed class ArchiveScanner
                 if (!inEntries)
                 {
                     if (line.StartsWith("----------", StringComparison.Ordinal)) inEntries = true;
+                    else if (archiveType == null
+                             && line.StartsWith("Type = ", StringComparison.Ordinal))
+                        archiveType = line["Type = ".Length..].Trim();
                     continue;
                 }
                 if (line.Length == 0) { Flush(); continue; }
@@ -286,9 +322,9 @@ public sealed class ArchiveScanner
                 else if (key == "Attributes") isDir |= val.StartsWith("D", StringComparison.OrdinalIgnoreCase);
             }
             Flush();
-            return (list, null, false);
+            return (list, null, false, archiveType);
         }
-        catch (Exception ex) { return (null, ex.Message, false); }
+        catch (Exception ex) { return (null, ex.Message, false, null); }
     }
 
     private readonly record struct SingleExtract(bool Ok, bool WrongPassword, string? File);
@@ -356,7 +392,9 @@ public sealed class ArchiveScanner
             return new ArchiveResult(false, Array.Empty<ArchiveEntryFinding>(),
                 "Archive is encrypted", PasswordProtected: true);
 
-        var entries = archive.List().Where(e => !e.IsDirectory).ToList();
+        var entries = archive.List()
+                             .Where(e => !e.IsDirectory && !LooksLikePeMember(e.Path))
+                             .ToList();
         if (entries.Count == 0) return null;
 
         if (entries.Any(e => e.Encrypted))

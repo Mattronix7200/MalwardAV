@@ -24,11 +24,7 @@ internal static class Program
              || args[0].Equals("make-sigdata", StringComparison.OrdinalIgnoreCase));
         if (!buildHelper) AdminCheck.RequireAdmin();
 
-        if (args.Length == 0)
-        {
-            PrintUsage();
-            return 1;
-        }
+        if (args.Length == 0) return 1;
 
         var settings = Settings.Load();
 
@@ -50,7 +46,7 @@ internal static class Program
             "repair"      => CmdRepair(args, settings),
             "sysrepair"   => CmdSysRepair(args),
             "submit-detection" => CmdSubmitDetection(args, settings),
-            _             => PrintUsageWithError($"Unknown verb: {args[0]}"),
+            _             => Fail($"Unknown verb: {args[0]}"),
         };
     }
 
@@ -79,7 +75,7 @@ internal static class Program
 
     internal static int CmdSubmitDetection(string[] args, Settings settings)
     {
-        if (args.Length < 2) return PrintUsageWithError("submit-detection: missing file path");
+        if (args.Length < 2) return Fail("submit-detection: missing file path");
         string path = args[1];
         string detection = "Behavior.Malicious";
         for (int i = 2; i < args.Length - 1; i++)
@@ -108,7 +104,7 @@ internal static class Program
 
         if (sub == "fix")
         {
-            if (args.Length < 3) return PrintUsageWithError("sysrepair fix: missing identifiers");
+            if (args.Length < 3) return Fail("sysrepair fix: missing identifiers");
             var ids = args[2].Equals("all", StringComparison.OrdinalIgnoreCase)
                 ? scanner.Scan().Where(i => i.Tampered && i.CanAutoRepair).Select(i => i.Id).ToList()
                 : args[2].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
@@ -146,9 +142,7 @@ internal static class Program
             return CmdRepairList(args, settings);
 
         if (args.Length < 3)
-            return PrintUsageWithError("repair: usage: repair <quarantine|delete|entry> <path> "
-                                       + "[--detection name] [--entry chain]"
-                                       + " | repair --list <file> [--report <file>]");
+            return Fail("repair: missing arguments");
         var action = args[1].ToLowerInvariant();
         var path = args[2];
         string? detection = null;
@@ -277,10 +271,10 @@ internal static class Program
     private static int CmdLookup(string[] args)
     {
         if (args.Length < 2)
-            return PrintUsageWithError("lookup: missing sha256");
+            return Fail("lookup: missing sha256");
         var sha = args[1].ToLowerInvariant();
         if (sha.Length != 64 || sha.Any(c => !"0123456789abcdef".Contains(c)))
-            return PrintUsageWithError("lookup: sha256 must be 64 hex chars");
+            return Fail("lookup: sha256 must be 64 hex chars");
 
         Console.WriteLine($"Lookup: {sha}\n");
         DumpVdebLookup("VPS", Paths.VpsVdebReadable, sha);
@@ -612,6 +606,30 @@ internal static class Program
     private sealed record CliOptions(string Target, Verbosity Verbosity, string? ReportPath, bool Realtime,
                                      string? Profile = null, string? PlanFile = null);
 
+    private static readonly string OwnDirectory = OwnDirectoryPath();
+
+    private static string OwnDirectoryPath()
+    {
+        try
+        {
+            var dir = Path.GetFullPath(AppContext.BaseDirectory);
+            return dir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        }
+        catch { return ""; }
+    }
+
+    private static bool IsUnderOwnDirectory(string path)
+    {
+        if (OwnDirectory.Length == 0) return false;
+        try
+        {
+            var full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar)
+                       + Path.DirectorySeparatorChar;
+            return full.StartsWith(OwnDirectory, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
     private static List<string> SafeList(string root, EnumerationOptions opts, CancellationToken ct = default)
     {
         var result = new List<string>();
@@ -703,7 +721,7 @@ internal static class Program
     {
         var opts = ParseScanArgs(args);
         if (opts == null)
-            return PrintUsageWithError("scan: missing path");
+            return Fail("scan: missing path");
 
         bool showStatus = opts.Verbosity != Verbosity.Silent;
         bool showLogs   = opts.Verbosity == Verbosity.Normal;
@@ -735,7 +753,7 @@ internal static class Program
             plan = ScanPlan.SingleTarget(target);
 
         if (plan.IsEmpty && !File.Exists(target))
-            return PrintUsageWithError("scan: the plan covers nothing — select at least one item");
+            return Fail("scan: the plan covers nothing — select at least one item");
 
         if (machine)
         {
@@ -1024,6 +1042,8 @@ internal static class Program
         catch (OperationCanceledException) {  }
         catch (Exception ex) { Console.Error.WriteLine($"[!] post-infection areas: {ex.Message}"); }
 
+        var alreadyScanned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         try
         {
             if (!plan.Drivers) throw new OperationCanceledException();
@@ -1037,6 +1057,7 @@ internal static class Program
                 foreach (var f in drvFiles)
                 {
                     if (cts.IsCancellationRequested) break;
+                    alreadyScanned.Add(f);
                     if (showStatus) status!.Step(f);
                     var dr = pipe.Scan(f);
                     stats.RecordResult(dr);
@@ -1071,14 +1092,21 @@ internal static class Program
             {
                 if (showStatus) status!.BeginStage("files");
                 var files = new List<string>();
-                var seenFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var seenFiles = new HashSet<string>(alreadyScanned, StringComparer.OrdinalIgnoreCase);
                 foreach (var folder in planFolders)
                 {
                     if (cts.IsCancellationRequested) break;
                     if (showStatus) status!.State("listing files", folder.Path);
+
+                    // Our own program directory is scanned only when the user points at it. Inside
+                    // a profile it is dead weight: the files are ours, and the folder sits under
+                    // Program Files, which the profile walks anyway.
+                    bool skipOwnDir = !IsUnderOwnDirectory(folder.Path);
+
                     foreach (var f in SafeList(folder.Path, _scanOpts, cts.Token))
                     {
                         if (!folder.Matches(f)) continue;
+                        if (skipOwnDir && IsUnderOwnDirectory(f)) continue;
 
                         if (seenFiles.Add(f)) files.Add(f);
                     }
@@ -1369,9 +1397,9 @@ internal static class Program
     private static int CmdAnalyze(string[] args, Settings settings)
     {
         if (args.Length < 2)
-            return PrintUsageWithError("analyze: missing quarantine-id (GUID)");
+            return Fail("analyze: missing quarantine-id (GUID)");
         if (!Guid.TryParse(args[1], out var id))
-            return PrintUsageWithError("analyze: invalid GUID");
+            return Fail("analyze: invalid GUID");
 
         var store = new QuarantineStore();
         var decrypted = store.DecryptPayload(id);
@@ -1447,7 +1475,7 @@ internal static class Program
     private static int CmdAnalyzeFile(string[] args, Settings settings)
     {
         if (args.Length < 2)
-            return PrintUsageWithError("analyze-file: missing path");
+            return Fail("analyze-file: missing path");
         var path = args[1];
         if (!File.Exists(path))
         {
@@ -1502,11 +1530,45 @@ internal static class Program
         }
     }
 
+    private static readonly string[] UpdateComponentKeys = { "vps", "heur", "whitelist" };
+
+    /// <summary>Machine-readable progress for a front end that drives this as a child process,
+    /// such as the installer. Opt-in, so the normal output stays exactly as it was.</summary>
+    private static void WireUpdateProgress(UpdateService svc)
+    {
+        var state = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        var gate = new object();
+        int lastPct = -1;
+
+        svc.Progress = (component, phase, pct) =>
+        {
+            lock (gate)
+            {
+                state[component] = phase is "updated" or "current" ? 1 : pct;
+
+                double sum = 0;
+                foreach (var key in UpdateComponentKeys)
+                    sum += state.TryGetValue(key, out var v) ? v : 0;
+
+                int now = (int)(sum / UpdateComponentKeys.Length * 100);
+                if (now == lastPct) return;
+                lastPct = now;
+
+                Console.WriteLine($"PROGRESS\tpct={now}\tcomponent={component}\tphase={phase}");
+                Console.Out.Flush();
+            }
+        };
+    }
+
     private static int CmdUpdate(string[] args, Settings settings)
     {
         try
         {
             using var svc = new UpdateService(settings);
+
+            if (args.Any(a => string.Equals(a, "--progress", StringComparison.OrdinalIgnoreCase)))
+                WireUpdateProgress(svc);
+
             int n = svc.UpdateAllAsync().GetAwaiter().GetResult();
             Console.WriteLine($"[*] Update done: {n} file(s) refreshed.");
             return 0;
@@ -1521,7 +1583,7 @@ internal static class Program
     private static int CmdFetchSandbox(string[] args, Settings settings)
     {
         if (args.Length < 2)
-            return PrintUsageWithError("fetch-sandbox <destPath>");
+            return Fail("fetch-sandbox: missing destination path");
         string dest = args[1];
         bool machine = Environment.GetEnvironmentVariable("MALWARD_MACHINE_OUTPUT") == "1";
         try
@@ -1557,7 +1619,7 @@ internal static class Program
     private static int CmdQuarantine(string[] args, Settings settings)
     {
         if (args.Length < 2)
-            return PrintUsageWithError("quarantine: missing action (list/restore/extract/export/decrypt/delete)");
+            return Fail("quarantine: missing action");
 
         if (args[1].Equals("decrypt", StringComparison.OrdinalIgnoreCase))
             return CmdQuarantineDecrypt(args);
@@ -1577,9 +1639,9 @@ internal static class Program
                 return 0;
 
             case "restore":
-                if (args.Length < 3) return PrintUsageWithError("restore <id> [destPath]");
+                if (args.Length < 3) return Fail("quarantine restore: missing id");
                 if (!Guid.TryParse(args[2], out var rid))
-                    return PrintUsageWithError("invalid guid");
+                    return Fail("invalid guid");
                 var dest = args.Length >= 4 ? args[3] : null;
                 if (store.Restore(rid, dest)) return 0;
                 Console.Error.WriteLine("[!] Restore failed.");
@@ -1587,9 +1649,9 @@ internal static class Program
 
             case "extract":
 
-                if (args.Length < 4) return PrintUsageWithError("extract <id> <destDir> [name]");
+                if (args.Length < 4) return Fail("quarantine extract: missing arguments");
                 if (!Guid.TryParse(args[2], out var eid))
-                    return PrintUsageWithError("invalid guid");
+                    return Fail("invalid guid");
                 var extracted = store.Extract(eid, args[3], args.Length >= 5 ? args[4] : null);
                 if (extracted != null) { Console.WriteLine($"[+] Extracted to: {extracted}"); return 0; }
                 Console.Error.WriteLine("[!] Extract failed.");
@@ -1597,9 +1659,9 @@ internal static class Program
 
             case "export":
                 {
-                    if (args.Length < 4) return PrintUsageWithError("export <id> <destPath>");
+                    if (args.Length < 4) return Fail("quarantine export: missing arguments");
                     if (!Guid.TryParse(args[2], out var xid))
-                        return PrintUsageWithError("invalid guid");
+                        return Fail("invalid guid");
                     var problem = store.ExportContainer(xid, args[3]);
                     if (problem.Length == 0) { Console.WriteLine($"[+] Exported to: {args[3]}"); return 0; }
                     Console.Error.WriteLine($"[!] Export failed: {problem}");
@@ -1607,21 +1669,21 @@ internal static class Program
                 }
 
             case "delete":
-                if (args.Length < 3) return PrintUsageWithError("delete <id>");
+                if (args.Length < 3) return Fail("quarantine delete: missing id");
                 if (!Guid.TryParse(args[2], out var did))
-                    return PrintUsageWithError("invalid guid");
+                    return Fail("invalid guid");
                 if (store.Delete(did)) { Console.WriteLine("[+] Removed."); return 0; }
                 Console.Error.WriteLine("[!] Not found.");
                 return 7;
 
             default:
-                return PrintUsageWithError($"unknown quarantine action: {args[1]}");
+                return Fail($"unknown quarantine action: {args[1]}");
         }
     }
 
     private static int CmdQuarantineDecrypt(string[] args)
     {
-        if (args.Length < 4) return PrintUsageWithError("decrypt <container.quarantine> <destPath>");
+        if (args.Length < 4) return Fail("quarantine decrypt: missing arguments");
         var src = args[2];
         if (!File.Exists(src))
         {
@@ -1679,7 +1741,7 @@ internal static class Program
         }
         else
         {
-            Console.WriteLine($"  VPS database   : (not present, run `malscan.exe update`)");
+            Console.WriteLine($"  VPS database   : (not present)");
         }
 
         var heurPath = Paths.HeurVdebReadable;
@@ -1772,37 +1834,10 @@ internal static class Program
         }
     }
 
-    private static int PrintUsageWithError(string msg)
+    private static int Fail(string msg)
     {
-        Console.Error.WriteLine($"[!] {msg}\n");
-        PrintUsage();
+        Console.Error.WriteLine($"[!] {msg}");
         return 1;
     }
 
-    private static void PrintUsage()
-    {
-        Console.WriteLine("""
-Malward(R) Virus Scanner — modular antivirus engine
-
-Użycie:
-  malscan.exe scan <ścieżka> [-silent|-s] [-verysilent|-vs] [-raport|-r [path]]
-                                      Skanuje plik lub katalog (rekursywnie)
-  malscan.exe scan-memory             Skanuje pamięć (procesy uruchomione)
-  malscan.exe update                  Pobiera vps.vdeb / heur.vdeb / rf-whitelist.vdeb
-  malscan.exe quarantine list         Listuje pliki w kwarantannie
-  malscan.exe quarantine restore <id> [destPath]   Przywraca plik
-  malscan.exe quarantine extract <id> <folder> [nazwa]   Kopiuje odszyfrowany plik
-  malscan.exe quarantine export  <id> <cel>        Kontener .quarantine do zgloszenia FP
-  malscan.exe quarantine decrypt <kontener> <cel>  Odszyfrowuje samodzielny .quarantine
-  malscan.exe quarantine delete  <id>              Usuwa wpis z kwarantanny
-  malscan.exe version                 Wersja silnika + bazy VPS/Heur
-
-Tryby logowania (dla `scan`):
-  -silent      / -s    bez logów (tylko exit code; brak summary unless -raport)
-  -verysilent  / -vs   tylko status bar + summary
-  -raport      / -r    zapisz raport tekstowy na pulpicie (lub w podanej ścieżce)
-
-Wymaga uprawnień administratora.
-""");
-    }
 }
