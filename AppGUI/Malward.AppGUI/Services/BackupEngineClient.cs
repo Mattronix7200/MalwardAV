@@ -77,16 +77,21 @@ public sealed class BackupEngineClient
 
     public static string CancelFlagPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "Malward", "data", "backup-cancel");
+
+    public static string LegacyCancelFlagPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "Malward", "backup", "backup-cancel");
 
-    public void RequestCancel()
+    public bool RequestCancel()
     {
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(CancelFlagPath)!);
             File.WriteAllText(CancelFlagPath, DateTimeOffset.UtcNow.ToString("o"));
+            return true;
         }
-        catch (Exception ex) { LastError = ex.Message; }
+        catch (Exception ex) { LastError = ex.Message; return false; }
     }
 
     public async Task<BackupRunOutcome> BackupNowAsync(string trigger,
@@ -98,6 +103,7 @@ public sealed class BackupEngineClient
         if (exe == null) { LastError = "nie znaleziono bkmonitor.exe"; return new BackupRunOutcome(); }
 
         try { File.Delete(CancelFlagPath); } catch { }
+        try { File.Delete(LegacyCancelFlagPath); } catch { }
 
         var psi = new ProcessStartInfo(exe)
         {
@@ -114,7 +120,7 @@ public sealed class BackupEngineClient
             using var p = Process.Start(psi);
             if (p == null) { LastError = "nie udało się uruchomić bkmonitor.exe"; return new BackupRunOutcome(); }
 
-            using var stop = ct.Register(RequestCancel);
+            using var stop = ct.Register(() => RequestCancel());
 
             string? json = null;
             const string MARK = "BACKUP-PROGRESS:";

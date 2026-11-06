@@ -32,9 +32,10 @@ public static class Loc
         try
         {
             var p = Path.Combine(appDataDir, "data", "gui-settings.json");
-            if (!File.Exists(p)) return "pl";
+            if (!File.Exists(p)) return UiLanguage.FromSystem();
             using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(p));
             var lang = doc.RootElement.TryGetProperty("lang", out var l) ? l.GetString() : null;
+            if (lang == null) return UiLanguage.FromSystem();
             return string.Equals(lang, "en", StringComparison.OrdinalIgnoreCase) ? "en" : "pl";
         }
         catch { return "pl"; }

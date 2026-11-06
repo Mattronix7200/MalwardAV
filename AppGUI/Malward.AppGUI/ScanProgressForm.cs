@@ -249,12 +249,17 @@ public sealed class ScanProgressForm : Form
         catch { }
     }
 
-    public void UpdateRemovableProgress(int pct, int done, int total, string? file, string? root)
+    public void UpdateRemovableProgress(int pct, int done, int total, string? file, string? root,
+                                        int media = 1)
     {
         if (IsDisposed) return;
         try
         {
-            if (_mode != Mode.RemovableRunning) ApplyMode(Mode.RemovableRunning, Loc.T("Skanowanie nośnika"));
+            var headline = media > 1
+                ? Loc.F("Skanowanie {0} nośników", media)
+                : Loc.T("Skanowanie nośnika");
+            if (_mode != Mode.RemovableRunning || _headline != headline)
+                ApplyMode(Mode.RemovableRunning, headline);
             if (pct >= 0) SetPct(pct);
             _lblCount.Text = total > 0 ? Loc.F("Przeskanowano: {0} / {1}", done, total) : Loc.F("Przeskanowano: {0}", done);
             _lblFile.Visible = true;

@@ -11,6 +11,8 @@ public partial class AppHost
 {
     private const string LocalScanId = "local";
 
+    internal const string RemovableTaskPrefix = "removable:";
+
     private DateTime? _scanStartedUtc;
 
     private string _scanToken = "";
@@ -42,6 +44,23 @@ public partial class AppHost
                 startedUnix = ToUnix(_scanStartedUtc),
                 pct = -1.0,
                 file = (string?)null,
+                folders = 0,
+            });
+        }
+
+        foreach (var st in RemovableScans)
+        {
+            if (st.Finished) continue;
+            tasks.Add(new
+            {
+                id = RemovableTaskPrefix + st.Root,
+                where = "removable",
+                attached = false,
+                target = st.Root,
+                mode = "removable",
+                startedUnix = ToUnix(st.StartedUtc),
+                pct = st.Total > 0 ? st.Done * 100.0 / st.Total : -1.0,
+                file = st.File,
                 folders = 0,
             });
         }
@@ -103,6 +122,13 @@ public partial class AppHost
     {
         if (string.IsNullOrEmpty(id)) return;
 
+        if (id.StartsWith(RemovableTaskPrefix, StringComparison.Ordinal))
+        {
+            CancelRemovableScan(id[RemovableTaskPrefix.Length..]);
+            PostToJs("scan.tasks.data", new { items = CollectScanTasks() });
+            return;
+        }
+
         if (id == LocalScanId)
         {
             HandleMessage("engine.scan.cancel", new System.Text.Json.Nodes.JsonObject());
@@ -131,6 +157,13 @@ public partial class AppHost
     private void AttachToScanTask(string id)
     {
         if (string.IsNullOrEmpty(id) || _engine == null) return;
+
+        if (id.StartsWith(RemovableTaskPrefix, StringComparison.Ordinal))
+        {
+            PostToJs("toast", new { level = "warn",
+                msg = "Skan nośnika prowadzi osłona rezydentna — jego postęp widzisz w okienku obok zegara." });
+            return;
+        }
 
         var driven = _engine.CurrentServiceScanId;
         if (string.Equals(driven, id, StringComparison.Ordinal))

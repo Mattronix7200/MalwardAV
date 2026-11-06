@@ -35,6 +35,7 @@ public partial class AppHost
     private ResidentIpc? _residentIpc;
     private NetworkServiceController? _network;
     private NetworkSettingsStore? _networkSettings;
+    private AdBlockListStore? _adBlockLists;
     private NetworkIpc? _networkIpc;
     private readonly BackupEngineClient _backupClient = new();
     private readonly BackupSettingsStore _backupSettings = new();
@@ -257,6 +258,7 @@ public partial class AppHost
             _assets = LoadAssetPack();
             byte[]? slownikEnWstepny = null;
             _assets?.TryGet("i18n/en.json", out slownikEnWstepny);
+            UiLanguage.SeedOnFirstRun(_appDataDir);
             Loc.Init(slownikEnWstepny, Loc.ReadLang(_appDataDir));
             if (_assets != null)
             {
@@ -315,6 +317,7 @@ public partial class AppHost
             var netExe = NetworkServiceController.FindNetmonitor();
             if (netExe != null) _network = new NetworkServiceController(netExe);
             _networkSettings = new NetworkSettingsStore(_appDataDir);
+            _adBlockLists = new AdBlockListStore(_appDataDir);
             _networkIpc = new NetworkIpc(_appDataDir);
 
             SeedDefaultProfileOnFirstRun();
@@ -809,7 +812,8 @@ public partial class AppHost
                 {
                     scanned = stats.FilesScanned,
                     cloud = stats.CloudAnalyzed,
-                    detections = stats.TotalDetections
+                    detections = stats.TotalDetections,
+                    urlBlocked = stats.UrlBlocked
                 }
             });
 
@@ -868,14 +872,6 @@ public partial class AppHost
         catch { return false; }
     }
 
-    /// <summary>Would running the repair as administrator plausibly change the outcome?</summary>
-    /// <remarks>
-    /// Files under Windows, System32, SysWOW64, WinSxS and Installer are owned by TrustedInstaller
-    /// and a normal user cannot replace them, so the engine returns access-denied and the list just
-    /// showed "errors 2". Those two facts - a protected location, or the words of a permission
-    /// error - are what earns the UAC prompt; everything else (file in use, missing) would not be
-    /// helped by elevation and must not pretend otherwise.
-    /// </remarks>
     private static bool RepairNeedsElevation(string path, string? detail)
     {
         var d = (detail ?? "").ToLowerInvariant();
@@ -916,13 +912,7 @@ public partial class AppHost
         }
         catch (Exception ex) { PostToJs("engine.log", new { level = "error", msg = $"settings load: {ex.Message}" }); }
 
-        var stats = _statsStore?.Read() ?? new ScanStatsData(0, 0, 0);
-        PostToJs("stats", new
-        {
-            scanned = stats.FilesScanned,
-            cloud = stats.CloudAnalyzed,
-            detections = stats.TotalDetections
-        });
+        PostStats();
 
         if (!_scannerEdition) PushProtectionStatus();
 
@@ -2002,8 +1992,7 @@ public partial class AppHost
                 }
             case "stats.read":
                 {
-                    var s = _statsStore?.Read() ?? new ScanStatsData(0, 0, 0);
-                    PostToJs("stats", new { scanned = s.FilesScanned, cloud = s.CloudAnalyzed, detections = s.TotalDetections });
+                    PostStats();
                     break;
                 }
             case "history.read":
@@ -2162,6 +2151,56 @@ public partial class AppHost
                             PushProtectionStatus();
                         });
                     });
+                    break;
+                }
+
+            case "adblock.lists.read":
+                {
+                    if (_adBlockLists == null) { PostToJs("adblock.lists.data", new { ok = false }); break; }
+                    var state = _adBlockLists.Read();
+                    PostToJs("adblock.lists.data", new
+                    {
+                        ok = true,
+                        catalog = (JsonNode)_adBlockLists.Catalog(),
+                        categories = _adBlockLists.Categories(),
+                        state = (JsonNode)state,
+                        stats = (JsonNode)_adBlockLists.Stats(),
+                        installed = (JsonNode)_adBlockLists.Installed(),
+                    });
+                    break;
+                }
+
+            case "adblock.lists.write":
+                {
+                    try
+                    {
+                        if (_adBlockLists == null)
+                        {
+                            PostToJs("adblock.lists.saved", new { ok = false, error = "brak magazynu" });
+                            break;
+                        }
+
+                        var payload = data["data"];
+                        if (payload == null || JsonNode.Parse(payload.ToJsonString()) is not JsonObject incoming)
+                        {
+                            PostToJs("adblock.lists.saved", new { ok = false, error = "brak danych" });
+                            break;
+                        }
+
+                        bool refresh = incoming["refresh"]?.GetValue<bool>() ?? false;
+                        var cur = _adBlockLists.Read();
+                        if (incoming["lists"] is JsonArray lists) cur["lists"] = lists.DeepClone();
+                        if (incoming["user_rules"] is JsonArray rules) cur["user_rules"] = rules.DeepClone();
+                        cur["last_update"] = refresh ? 0 : (cur["last_update"]?.GetValue<long>() ?? 0);
+                        if (refresh) cur["format"] = 0;
+                        _adBlockLists.Write(cur);
+
+                        PostToJs("adblock.lists.saved", new { ok = true, refresh });
+                    }
+                    catch (Exception ex)
+                    {
+                        PostToJs("adblock.lists.saved", new { ok = false, error = ex.Message });
+                    }
                     break;
                 }
 
@@ -2510,7 +2549,7 @@ public partial class AppHost
                         }
                     }
                     catch { }
-                    PostToJs("sandbox.settings.data", new { settings = s });
+                    PostToJs("sandbox.settings.data", new { settings = s, hw = SandboxHardware.Recommend() });
                     break;
                 }
             case "sandbox.settings.write":
@@ -3592,30 +3631,109 @@ public partial class AppHost
         _miniScanUserDismissed = false;
     }
 
+    internal sealed class RemovableScan
+    {
+        public string Root = "";
+        public int Done;
+        public int Total;
+        public int Pct;
+        public string? File;
+        public bool Finished;
+        public int Threats;
+        public DateTime StartedUtc = DateTime.UtcNow;
+    }
+
+    private readonly Dictionary<string, RemovableScan> _removableScans =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    internal IReadOnlyCollection<RemovableScan> RemovableScans
+    {
+        get { lock (_removableScans) return _removableScans.Values.ToList(); }
+    }
+
     private void HandleRemovableEvents(List<ResidentIpc.RemovableEvent> events)
     {
         Ui.Send(() =>
         {
-            foreach (var ev in events)
+            lock (_removableScans)
             {
-                var t = ev.Type.ToLowerInvariant();
-                if (t == "removable.started")
+                foreach (var ev in events)
                 {
-                    EnsureMiniScanPopup();
-                    _miniScan?.SetMode(ScanProgressForm.Mode.RemovableRunning, ev.Root, threats: 0);
-                }
-                else if (t == "removable.progress")
-                {
-                    EnsureMiniScanPopup();
-                    _miniScan?.UpdateRemovableProgress(ev.Pct, ev.Done, ev.Total, ev.File, ev.Root);
-                }
-                else if (t == "removable.finished")
-                {
-                    EnsureMiniScanPopup();
-                    _miniScan?.SetMode(ScanProgressForm.Mode.RemovableFinished, ev.Root, ev.Threats);
+                    var key = (ev.Root ?? "").TrimEnd('\\');
+                    if (key.Length == 0) continue;
+                    if (!_removableScans.TryGetValue(key, out var st))
+                        _removableScans[key] = st = new RemovableScan { Root = ev.Root ?? key };
+
+                    switch (ev.Type.ToLowerInvariant())
+                    {
+                        case "removable.started":
+                            st.StartedUtc = DateTime.UtcNow;
+                            st.Done = st.Total = st.Pct = st.Threats = 0;
+                            st.File = null;
+                            st.Finished = false;
+                            break;
+                        case "removable.progress":
+                            st.Done = ev.Done;
+                            st.Total = ev.Total;
+                            st.Pct = ev.Pct;
+                            st.File = ev.File;
+                            st.Finished = false;
+                            break;
+                        case "removable.finished":
+                            st.Finished = true;
+                            st.Threats = ev.Threats;
+                            break;
+                    }
                 }
             }
+
+            RenderRemovableProgress();
+            PostToJs("scan.tasks.data", new { items = CollectScanTasks() });
         });
+    }
+
+    private void RenderRemovableProgress()
+    {
+        List<RemovableScan> all;
+        lock (_removableScans) all = _removableScans.Values.ToList();
+        if (all.Count == 0) return;
+
+        var roll = RemovableAggregate.Combine(all
+            .Select(s => new RemovableSlice(s.Done, s.Total, s.Pct, s.Finished)).ToList());
+        EnsureMiniScanPopup();
+
+        if (roll.Media > 0)
+        {
+            var newest = all.Where(s => !s.Finished).OrderByDescending(s => s.Done).First();
+            _miniScan?.UpdateRemovableProgress(roll.Pct, roll.Done, roll.Total, newest.File,
+                                               newest.Root, roll.Media);
+            return;
+        }
+
+        int threats = all.Sum(s => s.Threats);
+        string subject = string.Join(", ", all.Select(s => s.Root));
+        _miniScan?.SetMode(ScanProgressForm.Mode.RemovableFinished, subject, threats);
+        lock (_removableScans) _removableScans.Clear();
+    }
+
+    internal void CancelRemovableScan(string root)
+    {
+        try
+        {
+            var dir = BackupDataDir;
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "removable-cancel");
+            var line = (root ?? "").TrimEnd('\\');
+            var have = File.Exists(path) ? File.ReadAllLines(path).ToList() : new List<string>();
+            if (!have.Contains(line, StringComparer.OrdinalIgnoreCase)) have.Add(line);
+            File.WriteAllLines(path, have);
+            PostToJs("toast", new { level = "ok", msg = "Przerywanie skanu nośnika zlecone." });
+        }
+        catch (Exception ex)
+        {
+            PostToJs("toast", new { level = "err",
+                msg = $"Nie udało się przerwać skanu nośnika: {ex.Message}" });
+        }
     }
 
     private void EnsureMiniScanPopup()
@@ -3862,6 +3980,21 @@ public partial class AppHost
     {
         try
         {
+            if (!_scanActive)
+            {
+                var zlecenie = ScheduleInbox.TakeRequest();
+                if (zlecenie != null)
+                {
+                    PostToJs("engine.log", new
+                    {
+                        level = "info",
+                        msg = $"scheduled scan handed over by the task scheduler: {zlecenie.Value.Mode}",
+                    });
+                    StartScheduledScan(zlecenie.Value.Mode, zlecenie.Value.Folders);
+                    return;
+                }
+            }
+
             var path = ScanInbox.Path;
             if (!File.Exists(path)) { EndCollecting(); return; }
 
@@ -3979,7 +4112,11 @@ public partial class AppHost
                     if (ipBlocks.Count > 0) ShowMaliciousIpAlerts(ipBlocks);
                 }
                 var netAct = _networkIpc.ReadActivityJson();
-                if (netAct != null) PostNetworkActivity(netAct);
+                if (netAct != null)
+                {
+                    AccumulateNetworkBlocked(netAct);
+                    PostNetworkActivity(netAct);
+                }
             }
         };
         _ipcTimer.Start();
@@ -4012,7 +4149,13 @@ public partial class AppHost
                 if (wpisy.Count == 0) return;
 
                 bool decide = false;
-                try { decide = _residentSettings?.Read()?["behavior_user_decides"]?.GetValue<bool>() ?? false; } catch { }
+                try
+                {
+                    var rs = _residentSettings?.Read();
+                    decide = rs?["behavior_user_decides"]?.GetValue<bool>() ?? false;
+                    if ((rs?["behavior_action"]?.GetValue<string>() ?? "") == "ask") decide = true;
+                }
+                catch { }
 
                 bool wszystkieDymkiem = true;
                 foreach (var w in wpisy)
@@ -4256,6 +4399,48 @@ public partial class AppHost
     private long _lastShieldCloud      = -1;
     private long _lastShieldDetections = -1;
 
+    private long _lastNetBlocked = -1;
+
+    private void AccumulateNetworkBlocked(string activityJson)
+    {
+        try
+        {
+            var node = JsonNode.Parse(activityJson);
+            long blocked = node?["blocked"]?.GetValue<long>() ?? -1;
+            if (blocked < 0) return;
+
+            if (_lastNetBlocked < 0 || blocked < _lastNetBlocked)
+            {
+                long fresh = _lastNetBlocked < 0 ? 0 : blocked;
+                _lastNetBlocked = blocked;
+                if (fresh > 0) _statsStore?.AddUrlBlocked(fresh);
+                else return;
+            }
+            else
+            {
+                long delta = blocked - _lastNetBlocked;
+                _lastNetBlocked = blocked;
+                if (delta <= 0) return;
+                _statsStore?.AddUrlBlocked(delta);
+            }
+
+            PostStats();
+        }
+        catch { }
+    }
+
+    private void PostStats()
+    {
+        var s = _statsStore?.Read() ?? new ScanStatsData(0, 0, 0);
+        PostToJs("stats", new
+        {
+            scanned = s.FilesScanned,
+            cloud = s.CloudAnalyzed,
+            detections = s.TotalDetections,
+            urlBlocked = s.UrlBlocked,
+        });
+    }
+
     private void AccumulateResidentScanned(string activityJson)
     {
         try
@@ -4295,8 +4480,7 @@ public partial class AppHost
             if (dDetections > 0)
                 _statsStore?.IncDetections(dDetections);
 
-            var s = _statsStore?.Read() ?? new ScanStatsData(0, 0, 0);
-            PostToJs("stats", new { scanned = s.FilesScanned, cloud = s.CloudAnalyzed, detections = s.TotalDetections });
+            PostStats();
         }
         catch { }
     }
@@ -4425,38 +4609,9 @@ public partial class AppHost
 
         if (!showNotifs) return;
 
-        if (auto.Count > 0)
-        {
-            ShowAlertWindow("auto", auto, theme, sound);
-            NotifyNeutralized(auto);
-        }
+        if (auto.Count > 0) ShowAlertWindow("auto", auto, theme, sound);
         if (ask.Count  > 0) ShowAlertWindow("ask",  ask,  theme, sound);
     }
-
-    /// <summary>Taskbar balloon ON TOP of the alert window, only while the app is out of sight.</summary>
-    /// <remarks>
-    /// It must never be the only notification. Windows drops a NotifyIcon balloon without a word
-    /// when notifications are off for the app or Focus Assist is on, and replacing the window with
-    /// it left the antivirus silent - the one thing an antivirus may not be. So the window always
-    /// shows and this is an extra nudge for a user who is looking at something else.
-    /// </remarks>
-    private void NotifyNeutralized(List<ResidentIpc.ShieldEvent> items)
-    {
-        if (_tray == null || items.Count == 0) return;
-        if (Shell.IsVisible && !Shell.IsMinimized) return;
-
-        var first = items[0];
-        var body = new System.Text.StringBuilder();
-        body.Append(Loc.T("Zneutralizowano zarażony plik:")).Append('\n');
-        body.Append(first.File).Append('\n');
-        body.Append(Loc.F("Infekcja: {0}", first.Detection));
-        if (items.Count > 1)
-            body.Append('\n').Append(Loc.F("oraz {0} innych", items.Count - 1));
-
-        _tray.NotifyBalloon(Loc.T("Malward — osłona w czasie rzeczywistym"), body.ToString(),
-            () => Ui.Send(RestoreToScanViewIfActive));
-    }
-
     private void ShowAlertWindow(string mode, List<ResidentIpc.ShieldEvent> items, string theme, bool sound)
     {
         if (WebMode)
@@ -4864,16 +5019,16 @@ public partial class AppHost
 
             string helperDir  = Path.GetDirectoryName(helper)!;
             string sandboxDir = Path.GetDirectoryName(helperDir) ?? helperDir;
-            string seed       = Path.Combine(sandboxDir, "shared", "default.7z");
+            bool haveSeed = File.Exists(SandboxSeedPath) || LegacySandboxSeed(sandboxDir) != null;
 
-            if (!File.Exists(seed))
+            if (!haveSeed)
             {
                 string? malscan = _verify?.MalscanPath;
                 if (string.IsNullOrEmpty(malscan) || !File.Exists(malscan))
                 { PostToJs("sandbox.launch.done", new { ok = false, error = "Brak obrazu piaskownicy, a malscan.exe jest niedostępny do pobrania." }); return; }
                 PostToJs("sandbox.launch.stage", new { stage = "download", msg = "Pobieranie obrazu piaskownicy z serwera…", pct = 0 });
-                bool dlOk = await Task.Run(() => RunFetchSandbox(malscan!, seed));
-                if (!dlOk) { PostToJs("sandbox.launch.done", new { ok = false, error = "Nie udało się pobrać obrazu piaskownicy z serwera." }); return; }
+                var (dlOk, dlError) = await Task.Run(() => RunFetchSandbox(malscan!, SandboxSeedPath));
+                if (!dlOk) { PostToJs("sandbox.launch.done", new { ok = false, error = dlError }); return; }
             }
 
             string statusFile = Path.Combine(Path.GetTempPath(), $"mw-sbox-status-{Guid.NewGuid():N}.json");
@@ -4894,6 +5049,7 @@ public partial class AppHost
             Arg("--ht", ht ? "on" : "off");
             Arg("--accel", accel);
             Arg("--bin", sandboxDir);
+            Arg("--data", SandboxDataDir);
             Arg("--status", statusFile);
 
             PostToJs("sandbox.launch.stage", new { stage = "starting", msg = "Przygotowywanie maszyny…", pct = -1 });
@@ -4921,11 +5077,12 @@ public partial class AppHost
                     PostToJs("sandbox.launch.stage", new { stage, msg, pct = -1 });
                 }
                 if (stage == "running") { PostToJs("sandbox.launch.done", new { ok = true }); break; }
-                if (stage == "error")   { PostToJs("sandbox.launch.done", new { ok = false, error = msg }); break; }
+                if (stage == "error")
+                { PostToJs("sandbox.launch.done", new { ok = false, error = LaunchFailureText(helper, msg) }); break; }
                 if (proc != null && proc.HasExited)
                 {
                     if (lastStage != "running")
-                        PostToJs("sandbox.launch.done", new { ok = false, error = string.IsNullOrEmpty(msg) ? "Maszyna nie wystartowała (sprawdź akcelerację/ustawienia)." : msg });
+                        PostToJs("sandbox.launch.done", new { ok = false, error = LaunchFailureText(helper, msg) });
                     break;
                 }
             }
@@ -4937,8 +5094,13 @@ public partial class AppHost
         }
     }
 
-    private bool RunFetchSandbox(string malscan, string dest, string evtType = "sandbox.launch.stage")
+    private (bool ok, string? error) RunFetchSandbox(string malscan, string dest,
+                                                     string evtType = "sandbox.launch.stage")
     {
+        var destDir = Path.GetDirectoryName(dest) ?? "";
+        try { if (destDir.Length > 0) Directory.CreateDirectory(destDir); }
+        catch (Exception ex) { return (false, $"Brak dostępu do katalogu {destDir}: {ex.Message}"); }
+
         try
         {
             var psi = new ProcessStartInfo
@@ -4951,11 +5113,26 @@ public partial class AppHost
             psi.ArgumentList.Add("fetch-sandbox");
             psi.ArgumentList.Add(dest);
             using var p = Process.Start(psi);
-            if (p == null) return false;
+            if (p == null) return (false, "Nie udało się uruchomić malscan.exe.");
+
+            var diagnostics = new List<string>();
+            var drain = Task.Run(() =>
+            {
+                string? err;
+                while ((err = p.StandardError.ReadLine()) != null)
+                {
+                    err = err.Trim();
+                    if (err.Length > 0 && diagnostics.Count < 20) diagnostics.Add(err);
+                }
+            });
+
+            string? reported = null;
             string? line;
             while ((line = p.StandardOutput.ReadLine()) != null)
             {
-                if (!line.StartsWith("SBDL\t", StringComparison.Ordinal) || line.Contains("\terror=")) continue;
+                if (!line.StartsWith("SBDL\t", StringComparison.Ordinal)) continue;
+                int at = line.IndexOf("\terror=", StringComparison.Ordinal);
+                if (at >= 0) { reported = line[(at + 7)..].Trim(); continue; }
                 double pct = 0; long done = 0, total = 0;
                 foreach (var part in line.Split('\t'))
                 {
@@ -4967,9 +5144,56 @@ public partial class AppHost
                 PostToJs(evtType, new { stage = "download", msg = $"Pobieranie modułu piaskownicy… {mb}", pct });
             }
             p.WaitForExit();
-            return p.ExitCode == 0 && File.Exists(dest);
+            drain.Wait(TimeSpan.FromSeconds(2));
+
+            if (p.ExitCode == 0 && File.Exists(dest)) return (true, null);
+
+            if (string.IsNullOrWhiteSpace(reported))
+                reported = diagnostics.FindLast(x => x.StartsWith("[!]", StringComparison.Ordinal))
+                           ?? (diagnostics.Count > 0 ? diagnostics[^1] : null);
+            if (string.IsNullOrWhiteSpace(reported))
+                reported = p.ExitCode == 0
+                    ? $"Pobrany plik nie pojawił się pod ścieżką {dest}."
+                    : $"malscan.exe zakończył pobieranie kodem {p.ExitCode}.";
+            return (false, reported);
         }
-        catch { return false; }
+        catch (Exception ex) { return (false, $"{ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    private static string LaunchFailureText(string helper, string msg)
+    {
+        string text = string.IsNullOrWhiteSpace(msg)
+            ? "Maszyna nie wystartowała (sprawdź akcelerację/ustawienia)."
+            : msg;
+        if (!SameBuildAsApp(helper))
+            text += " Moduł piaskownicy pochodzi z innego wydania programu — zainstaluj go ponownie.";
+        return text;
+    }
+
+    private static bool SameBuildAsApp(string helper)
+    {
+        try
+        {
+            static string Version(string path) =>
+                (FileVersionInfo.GetVersionInfo(path).ProductVersion ?? "").Split('+')[0].Trim();
+
+            string app = Version(Environment.ProcessPath ?? "");
+            string module = Version(helper);
+            return app.Length == 0 || module.Length == 0
+                   || string.Equals(app, module, StringComparison.Ordinal);
+        }
+        catch { return true; }
+    }
+
+    private static string SandboxDataDir => Path.Combine(_appDataDir, "sandbox");
+
+    private static string SandboxSeedPath => Path.Combine(SandboxDataDir, "shared", "default.7z");
+
+    private static string? LegacySandboxSeed(string sandboxDir)
+    {
+        if (string.IsNullOrEmpty(sandboxDir)) return null;
+        var legacy = Path.Combine(sandboxDir, "shared", "default.7z");
+        return File.Exists(legacy) ? legacy : null;
     }
 
     private (string? helper, string sandboxDir, bool qemu, bool disk) SandboxModuleState()
@@ -4987,13 +5211,13 @@ public partial class AppHost
         string helperDir  = Path.GetDirectoryName(helper)!;
         string sandboxDir = Path.GetDirectoryName(helperDir) ?? helperDir;
         bool qemu = File.Exists(Path.Combine(sandboxDir, "qemu", "qemu-system-x86_64.exe"));
-        bool disk = File.Exists(Path.Combine(sandboxDir, "shared", "default.7z"));
+        bool disk = File.Exists(SandboxSeedPath) || LegacySandboxSeed(sandboxDir) != null;
         return (helper, sandboxDir, qemu, disk);
     }
 
     private async Task InstallSandboxModuleAsync()
     {
-        var (helper, dir, qemu, _) = SandboxModuleState();
+        var (helper, _, qemu, _) = SandboxModuleState();
         if (helper == null)
         { PostToJs("sandbox.module.installed", new { ok = false, error = "Nie znaleziono kontrolera piaskownicy (SBHelper.exe). Wskaż go w ustawieniach zaawansowanych." }); return; }
         if (!qemu)
@@ -5002,10 +5226,9 @@ public partial class AppHost
         if (string.IsNullOrEmpty(malscan) || !File.Exists(malscan))
         { PostToJs("sandbox.module.installed", new { ok = false, error = "malscan.exe niedostępny — nie można pobrać modułu." }); return; }
 
-        string seed = Path.Combine(dir, "shared", "default.7z");
         PostToJs("sandbox.module.progress", new { msg = "Pobieranie modułu piaskownicy z serwera…", pct = 0 });
-        bool ok = await Task.Run(() => RunFetchSandbox(malscan!, seed, "sandbox.module.progress"));
-        PostToJs("sandbox.module.installed", new { ok, error = ok ? null : "Nie udało się pobrać modułu piaskownicy z serwera." });
+        var (ok, error) = await Task.Run(() => RunFetchSandbox(malscan!, SandboxSeedPath, "sandbox.module.progress"));
+        PostToJs("sandbox.module.installed", new { ok, error = ok ? null : error });
     }
 
     private async Task ToolsAnalyzeAsync(string path)
@@ -5588,7 +5811,7 @@ public partial class AppHost
             if (File.Exists(Path.Combine(dataDir, "urls.vdeb"))) urlDbReady = true;
             if (!urlDbReady)
             {
-                foreach (var prof in new[] { "low", "low-ads", "medium", "medium-ads", "high", "high-ads" })
+                foreach (var prof in new[] { "low", "medium", "high" })
                 {
                     if (File.Exists(Path.Combine(dataDir, $"urls-{prof}.vdeb"))) { urlDbReady = true; break; }
                 }
@@ -5954,24 +6177,64 @@ public partial class AppHost
         catch (Exception ex) { PostToJs("settings.bundle.result", new { ok = false, action = "import", error = ex.Message }); }
     }
 
+    private List<string> OwnExclusionPaths()
+    {
+        var own = new List<string>();
+        void Add(string? p)
+        {
+            if (string.IsNullOrWhiteSpace(p)) return;
+            var t = p.TrimEnd('\\');
+            if (t.Length > 0 && !own.Contains(t, StringComparer.OrdinalIgnoreCase)) own.Add(t);
+        }
+
+        try { Add(_appDataDir); } catch { }
+        try { Add(AppContext.BaseDirectory); } catch { }
+        try
+        {
+            foreach (var root in new[]
+                     {
+                         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                         Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                         Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                     })
+                Add(Path.Combine(root, "Malward"));
+        }
+        catch { }
+        return own;
+    }
+
     private void StripMalwardExclusions(JsonObject section)
     {
         try
         {
-            if (section["exclusions"] is not JsonArray arr) return;
-            var own = new List<string>();
-            try { if (!string.IsNullOrEmpty(_appDataDir)) own.Add(_appDataDir.TrimEnd('\\')); } catch { }
-            try { own.Add(AppContext.BaseDirectory.TrimEnd('\\')); } catch { }
+            var own = OwnExclusionPaths();
             if (own.Count == 0) return;
+            bool Ours(string path)
+                => own.Any(o => string.Equals(o, path.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));
 
-            var kept = new JsonArray();
-            foreach (var node in arr.OfType<JsonObject>())
+            if (section["exclusions"] is JsonArray arr)
             {
-                var path = node["path"]?.GetValue<string>()?.TrimEnd('\\') ?? "";
-                if (own.Any(o => string.Equals(o, path, StringComparison.OrdinalIgnoreCase))) continue;
-                kept.Add(node.DeepClone());
+                var kept = new JsonArray();
+                foreach (var node in arr.OfType<JsonObject>())
+                {
+                    var path = node["path"]?.GetValue<string>() ?? "";
+                    if (Ours(path)) continue;
+                    kept.Add(node.DeepClone());
+                }
+                section["exclusions"] = kept;
             }
-            section["exclusions"] = kept;
+
+            if (section["exceptions"] is JsonArray paths)
+            {
+                var kept = new JsonArray();
+                foreach (var node in paths)
+                {
+                    var path = node?.GetValue<string>() ?? "";
+                    if (path.Length == 0 || Ours(path)) continue;
+                    kept.Add(path);
+                }
+                section["exceptions"] = kept;
+            }
         }
         catch { }
     }
@@ -5983,7 +6246,8 @@ public partial class AppHost
         if (bundle["resident"] is JsonObject rs)
         { var rsc = (JsonObject)rs.DeepClone(); StripMalwardExclusions(rsc); _residentSettings?.Write(rsc); }
         if (bundle["network"]  is JsonObject nw) _networkSettings?.Write((JsonObject)nw.DeepClone());
-        if (bundle["backup"]   is JsonObject bk) _backupSettings.Merge((JsonObject)bk.DeepClone());
+        if (bundle["backup"] is JsonObject bk && _backupClient?.IsAvailable == true)
+            _backupSettings.Merge((JsonObject)bk.DeepClone());
 
         if (bundle["hips"]     is JsonObject hp) ApplyHipsProfile(hp);
 
@@ -6122,11 +6386,13 @@ public partial class AppHost
                 return;
             }
 
+            FirstRunProfile.HoldShieldsForConsent(bundle);
             ApplySettingsBundle(bundle);
             ApplyLolbinRulesForProfile("medium");
 
             _guiSettings.Write(zapisane with { ActiveProfile = "medium" });
-            CrashLog.Write("profile", null, "first run: applied the medium profile as the default");
+            CrashLog.Write("profile", null,
+                "first run: applied the medium profile with the shields left off until the user answers");
         }
         catch (Exception ex) { CrashLog.Write("profile", ex); }
     }
@@ -6186,7 +6452,10 @@ public partial class AppHost
             }
             catch { }
 
-            try { _backupSettings.RestartService(); } catch { }
+            if (_backupClient?.IsAvailable == true)
+            {
+                try { _backupSettings.RestartService(); } catch { }
+            }
         }
         finally
         {
@@ -6270,8 +6539,13 @@ public partial class AppHost
 
     internal void CancelInitialBackup()
     {
-        try { _backupClient?.RequestCancel(); } catch { }
+        bool wrote = false;
+        try { wrote = _backupClient?.RequestCancel() ?? false; } catch { }
         try { _initialBackupCts?.Cancel(); } catch { }
+        if (!wrote)
+            PostToJs("toast", new { level = "err",
+                msg = "Nie udało się przerwać kopii — program nie mógł zapisać znacznika anulowania. "
+                    + "Szczegóły w dzienniku." });
     }
 
     private async Task<string> AskInitialBackupAsync(BackupEngineClient.BackupEstimate? est)
@@ -6285,7 +6559,7 @@ public partial class AppHost
         }));
 
         var answered = await Task.WhenAny(_backupAsk.Task, Task.Delay(TimeSpan.FromMinutes(5)));
-        var choice = answered == _backupAsk.Task ? _backupAsk.Task.Result : "background";
+        var choice = answered == _backupAsk.Task ? _backupAsk.Task.Result : "skip";
         _backupAsk = null;
         Ui.Send(() => PostToJs("backup.initial.ask.close", new { }));
         return choice;
@@ -6297,36 +6571,29 @@ public partial class AppHost
         {
             await RunBootBackupOnceAsync();
 
-            if (File.Exists(InitialBackupMarker)) { emit("uptodate", "Kopia wstępna już istnieje"); return; }
-            if (File.Exists(InitialBackupSkipMarker)) { emit("uptodate", "Kopia wstępna pominięta przez użytkownika"); return; }
-            if (_backupClient == null || !_backupClient.IsAvailable)
-            {
-                emit("uptodate", "Kopia zapasowa niedostępna — krok pominięty");
-                return;
-            }
-
             Directory.CreateDirectory(BackupDataDir);
 
             emit("busy", "Sprawdzanie, ile danych trzeba skopiować…");
-            var est = await _backupClient.EstimateAsync();
+            string choice = await ResolveInitialBackupAsync();
 
-            string choice = "now";
-            long eta = est?.EtaSec ?? -1;
-            if (est == null || eta < 0 || eta > InitialBackupAskSeconds)
-                choice = await AskInitialBackupAsync(est);
-
-            if (choice == "skip")
+            switch (choice)
             {
-                try { File.WriteAllText(InitialBackupSkipMarker, DateTimeOffset.UtcNow.ToString("o")); } catch { }
-                emit("uptodate", "Kopia wstępna pominięta — możesz ją uruchomić w panelu kopii zapasowej");
-                return;
-            }
-
-            if (choice == "background")
-            {
-                StartInitialBackupInBackground();
-                emit("ok", "Kopia zapasowa tworzy się w tle");
-                return;
+                case "done":
+                    emit("uptodate", "Kopia wstępna już istnieje");
+                    return;
+                case "unavailable":
+                    emit("uptodate", "Kopia zapasowa niedostępna — krok pominięty");
+                    return;
+                case "pending":
+                    emit("uptodate", "Pytanie o kopię wstępną czeka już na odpowiedź");
+                    return;
+                case "skip":
+                    emit("uptodate", "Kopia wstępna pominięta — możesz ją uruchomić w panelu kopii zapasowej");
+                    return;
+                case "background":
+                    StartInitialBackupInBackground();
+                    emit("ok", "Kopia zapasowa tworzy się w tle");
+                    return;
             }
 
             await RunInitialBackupAsync(emit);
@@ -6387,6 +6654,8 @@ public partial class AppHost
         _initialBackupCts?.Dispose();
         _initialBackupCts = new CancellationTokenSource();
 
+        Ui.Send(() => PostToJs("backup.initial.started", new { }));
+
         _ = Task.Run(async () =>
         {
             try
@@ -6415,7 +6684,11 @@ public partial class AppHost
             finally
             {
                 _backupRunning = false;
-                Ui.Send(() => PostToJs("backup.status.refresh", new { running = false }));
+                Ui.Send(() =>
+                {
+                    PostToJs("backup.initial.finished", new { });
+                    PostToJs("backup.status.refresh", new { running = false });
+                });
             }
         });
     }
@@ -6727,37 +7000,44 @@ public partial class AppHost
         catch { }
     }
 
-    private async Task<bool> TryFirstBackupWithoutWaitingAsync()
-    {
-        if (File.Exists(InitialBackupMarker) || File.Exists(InitialBackupSkipMarker)) return false;
-        if (_backupClient == null || !_backupClient.IsAvailable) return false;
+    private readonly SemaphoreSlim _initialBackupGate = new(1, 1);
 
+    private async Task<string> ResolveInitialBackupAsync()
+    {
+        if (!await _initialBackupGate.WaitAsync(0)) return "pending";
         try
         {
-            var status = await _backupClient.StatusAsync();
-            if (status != null && status.SnapCount > 0)
+            if (File.Exists(InitialBackupMarker)) return "done";
+            if (File.Exists(InitialBackupSkipMarker)) return "skip";
+            if (_backupClient == null || !_backupClient.IsAvailable) return "unavailable";
+
+            try
             {
-                try { File.WriteAllText(InitialBackupMarker, DateTimeOffset.UtcNow.ToString("o")); } catch { }
-                return false;
+                var status = await _backupClient.StatusAsync();
+                if (status != null && status.SnapCount > 0)
+                {
+                    try { File.WriteAllText(InitialBackupMarker, DateTimeOffset.UtcNow.ToString("o")); } catch { }
+                    return "done";
+                }
             }
-        }
-        catch { return false; }
+            catch { return "unavailable"; }
 
-        var est = await _backupClient.EstimateAsync();
-        long eta = est?.EtaSec ?? -1;
-        if (est != null && eta >= 0 && eta <= InitialBackupAskSeconds)
-        {
-            StartInitialBackupInBackground();
-            return true;
+            var est = await _backupClient.EstimateAsync();
+            var choice = await AskInitialBackupAsync(est);
+            if (choice == "skip")
+            {
+                try { File.WriteAllText(InitialBackupSkipMarker, DateTimeOffset.UtcNow.ToString("o")); } catch { }
+            }
+            return choice;
         }
+        finally { _initialBackupGate.Release(); }
+    }
 
-        var choice = await AskInitialBackupAsync(est);
-        if (choice == "skip")
-        {
-            try { File.WriteAllText(InitialBackupSkipMarker, DateTimeOffset.UtcNow.ToString("o")); } catch { }
-            return true;
-        }
-
+    private async Task<bool> TryFirstBackupWithoutWaitingAsync()
+    {
+        var choice = await ResolveInitialBackupAsync();
+        if (choice is "done" or "unavailable") return false;
+        if (choice is "pending" or "skip") return true;
         StartInitialBackupInBackground();
         return true;
     }

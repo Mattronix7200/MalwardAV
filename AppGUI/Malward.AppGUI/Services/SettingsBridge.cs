@@ -79,7 +79,7 @@ public sealed class SettingsBridge
             ["cloud_verify_detections"] = true,
             ["scan_optimization"] = true,
             ["quarantine_size_limit_mb"] = 5120,
-            ["trust_whitelist"] = true,
+
             ["skip_ms_signed"] = false,
             ["repair_mode"] = 1,
             ["archive_repair_mode"] = 1,

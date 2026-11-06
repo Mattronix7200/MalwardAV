@@ -36,6 +36,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\..\NetworkScannerSDK\AdBlock\AdListCatalog.cs"
+             Link="AdBlock\AdListCatalog.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Resource Include="Resources\icon.ico" />
   </ItemGroup>
 

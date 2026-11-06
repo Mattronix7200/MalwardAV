@@ -20,6 +20,7 @@ public static class Launcher
             _mutex = new Mutex(initiallyOwned: true, Startup.MutexName, out bool created);
             if (!created)
             {
+                if (ScheduleInbox.TryHandOver(args)) return 0;
                 Startup.ForwardScanRequest(args);
                 try { Startup.ActivateExistingInstance(); } catch { }
                 return 0;

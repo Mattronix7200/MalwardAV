@@ -20,8 +20,6 @@ public static class Startup
     public const string MutexName = "Local\\Malward.AppGUI.SingleInstance";
 
     public static bool IsHeadlessCommand(string[] args) => args.Any(a =>
-        a.Equals("--scheduled-scan", StringComparison.OrdinalIgnoreCase) ||
-        a.StartsWith("--scheduled-scan=", StringComparison.OrdinalIgnoreCase) ||
         a.Equals("--update-engine", StringComparison.OrdinalIgnoreCase));
 
     public static void ForwardScanRequest(string[] args)

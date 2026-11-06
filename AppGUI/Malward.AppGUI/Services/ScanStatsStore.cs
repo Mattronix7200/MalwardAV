@@ -8,7 +8,8 @@ namespace Malward.AppGUI.Services;
 public sealed record ScanStatsData(
     [property: JsonPropertyName("files_scanned")]  long FilesScanned,
     [property: JsonPropertyName("cloud_analyzed")] long CloudAnalyzed,
-    [property: JsonPropertyName("total_detections")] long TotalDetections);
+    [property: JsonPropertyName("total_detections")] long TotalDetections,
+    [property: JsonPropertyName("url_blocked")] long UrlBlocked = 0);
 
 public sealed class ScanStatsStore
 {
@@ -54,10 +55,11 @@ public sealed class ScanStatsStore
         lock (_lock)
         {
             var cur = Read();
-            var next = new ScanStatsData(
-                cur.FilesScanned + Math.Max(0, filesScanned),
-                cur.CloudAnalyzed + Math.Max(0, cloudUsed),
-                cur.TotalDetections);
+            var next = cur with
+            {
+                FilesScanned = cur.FilesScanned + Math.Max(0, filesScanned),
+                CloudAnalyzed = cur.CloudAnalyzed + Math.Max(0, cloudUsed),
+            };
             Write(next);
         }
     }
@@ -68,6 +70,16 @@ public sealed class ScanStatsStore
         {
             var cur = Read();
             Write(cur with { TotalDetections = 0 });
+        }
+    }
+
+    public void AddUrlBlocked(long n)
+    {
+        if (n <= 0) return;
+        lock (_lock)
+        {
+            var cur = Read();
+            Write(cur with { UrlBlocked = cur.UrlBlocked + n });
         }
     }
 

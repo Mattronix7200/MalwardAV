@@ -7,17 +7,30 @@ namespace Malward.AppGUI;
 
 public partial class AppHost
 {
-    private bool ReportByBalloon(EventCentre.Entry wpis)
+    private bool ReportByBalloon(EventCentre.Entry wpis, string? tytul = null, string? tresc = null)
     {
         if (!WebMode) return false;
         try
         {
             _balloonEventId = wpis.Id;
-            _tray?.NotifyBalloon(wpis.Title,
-                string.IsNullOrWhiteSpace(wpis.Path) ? wpis.Detection : $"{wpis.Detection} — {wpis.Path}",
+            _tray?.NotifyBalloon(tytul ?? wpis.Title,
+                tresc ?? (string.IsNullOrWhiteSpace(wpis.Path)
+                          ? wpis.Detection
+                          : $"{wpis.Detection} — {wpis.Path}"),
                 OpenEventCentre);
         }
         catch (Exception ex) { CrashLog.Write("web-ui", ex, "balloon for a pending event"); }
+        return true;
+    }
+
+    private bool NotificationsEnabled()
+    {
+        try
+        {
+            if (_residentSettings?.Read() is { } rs && rs["notifications"] is System.Text.Json.Nodes.JsonNode n)
+                return n.GetValue<bool>();
+        }
+        catch { }
         return true;
     }
 
@@ -78,6 +91,7 @@ public partial class AppHost
     {
         if (_residentIpc == null) return false;
         bool dymkiem = false;
+        var automatyczne = new List<EventCentre.Entry>();
         foreach (var e in zdarzenia)
         {
             try
@@ -90,9 +104,8 @@ public partial class AppHost
 
                 if (!pyta)
                 {
-                    EventCentre.Report("realtime", tytul, e.Detection, proces, e.File,
-                                       string.IsNullOrWhiteSpace(e.Action) ? null : e.Action);
-
+                    automatyczne.Add(EventCentre.Report("realtime", tytul, e.Detection, proces, e.File,
+                                       string.IsNullOrWhiteSpace(e.Action) ? null : e.Action));
                     if (WebMode) dymkiem = true;
                     continue;
                 }
@@ -116,6 +129,16 @@ public partial class AppHost
             }
             catch (Exception ex) { CrashLog.Write("event-centre", ex, "real-time detection"); }
         }
+
+        if (automatyczne.Count > 0 && WebMode && NotificationsEnabled())
+        {
+            var ostatni = automatyczne[^1];
+            if (automatyczne.Count == 1) ReportByBalloon(ostatni);
+            else
+                ReportByBalloon(ostatni, Loc.T("Zablokowano zagrożenia"),
+                    $"{automatyczne.Count} × {ostatni.Detection}");
+        }
+
         return dymkiem;
     }
 
@@ -140,8 +163,8 @@ public partial class AppHost
             bool jestCoPrzywracac = mozeDecydowac && e.QuarantineIds is { Count: > 0 };
             if (!jestCoPrzywracac)
             {
-                EventCentre.Report(rodzaj, tytul, e.Detection, e.Process, sciezka, szczegoly);
-                return WebMode;
+                var zgloszenie = EventCentre.Report(rodzaj, tytul, e.Detection, e.Process, sciezka, szczegoly);
+                return NotificationsEnabled() ? ReportByBalloon(zgloszenie) : WebMode;
             }
 
             var akcje = new List<EventCentre.Choice>

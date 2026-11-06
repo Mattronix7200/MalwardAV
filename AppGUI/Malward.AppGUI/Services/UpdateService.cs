@@ -39,7 +39,8 @@ public sealed class UpdateService
         [property: JsonPropertyName("urls_profiles")] Dictionary<string, FileMeta>? UrlsProfiles = null,
         [property: JsonPropertyName("ipbase")]     FileMeta? IpBase = null,
         [property: JsonPropertyName("urlcache")]   FileMeta? UrlCache = null,
-        [property: JsonPropertyName("byod")]       FileMeta? Byod = null);
+        [property: JsonPropertyName("byod")]       FileMeta? Byod = null,
+        [property: JsonPropertyName("certs")]      FileMeta? Certs = null);
 
     public sealed record ProgressEvent(
         string Phase,
@@ -199,7 +200,7 @@ public sealed class UpdateService
             var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             { "vps.vdeb", "heur.vdeb", "rf-whitelist.vdeb", "vps-ex01.vdeb", "vps-ex02.vdeb",
               "vps-ex03.vdeb", "vps-ex04.vdeb" };
-            foreach (var prof in new[] { "low", "low-ads", "medium", "medium-ads", "high", "high-ads" })
+            foreach (var prof in new[] { "low", "medium", "high" })
                 allowed.Add($"urls-{prof}.vdeb");
 
             using var zip = System.IO.Compression.ZipFile.OpenRead(zipPath);
@@ -338,9 +339,19 @@ public sealed class UpdateService
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "Malward", "data");
 
+    private static bool AlreadyHaveFile(string path, FileMeta meta)
+    {
+        try
+        {
+            if (meta.Size <= 0 || !File.Exists(path)) return false;
+            return new FileInfo(path).Length == meta.Size;
+        }
+        catch { return false; }
+    }
+
     private static string ResolveUrlProfile()
     {
-        string lvl = "medium"; bool ads = false;
+        string lvl = "medium";
         try
         {
             var p = Path.Combine(DataDir, "network-settings.json");
@@ -348,14 +359,13 @@ public sealed class UpdateService
             {
                 var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(p));
                 lvl = node?["sensitivity_profile"]?.GetValue<string>() ?? "medium";
-                ads = node?["ad_blocking"]?.GetValue<bool>() ?? false;
-
-                if (lvl.EndsWith("-ads", StringComparison.OrdinalIgnoreCase)) { ads = true; lvl = lvl[..^4]; }
             }
         }
         catch { }
+        lvl = (lvl ?? "medium").Trim().ToLowerInvariant();
+        if (lvl.EndsWith("-ads", StringComparison.Ordinal)) lvl = lvl[..^4];
         if (lvl is not ("low" or "medium" or "high")) lvl = "medium";
-        return ads ? lvl + "-ads" : lvl;
+        return lvl;
     }
 
     private const string DEFAULT_SERVER_IP    = "83.168.95.69";
@@ -494,6 +504,8 @@ public sealed class UpdateService
             return new UpdateSummary(false, new());
         }
 
+        StoreManifestVersions(manifest);
+
         var dbinfo = new Dictionary<string, DbInfoEntry>(StringComparer.OrdinalIgnoreCase);
         try
         {
@@ -570,7 +582,7 @@ public sealed class UpdateService
             }
             else { urlsUrl = urlsDest = ""; }
 
-            if (urlsMeta != null)
+            if (urlsMeta != null && !AlreadyHaveFile(urlsDest, urlsMeta))
                 tasks.Add(("extras", urlsUrl, urlsDest, urlsMeta));
         }
         catch {  }
@@ -708,47 +720,41 @@ public sealed class UpdateService
         return new UpdateSummary(allChanged.Count > 0, allChanged);
     }
 
-    private const string CscbCertsUrl      = "https://bazaar.abuse.ch/export/csv/cscb/";
+
+
+    private void StoreManifestVersions(Manifest manifest)
+    {
+        try
+        {
+            DbVersionStore.WriteVersions(Path.Combine(DataDir, "db-versions-server.json"),
+                new Dictionary<string, string?>
+                {
+                    ["heur"]     = manifest.Heur?.Version,
+                    ["botip"]    = manifest.IpBase?.Version,
+                    ["urlcache"] = manifest.UrlCache?.Version,
+                    ["byod"]     = manifest.Byod?.Version,
+                    ["cert"]     = manifest.Certs?.Version,
+                });
+        }
+        catch (Exception ex) { Log($"manifest versions not stored: {ex.Message}"); }
+    }
 
     private async Task StoreExtraListVersionsAsync(CancellationToken ct)
     {
         try
         {
+            await EnsureAuthAsync(ct);
             var manifest = await _http.GetFromJsonAsync<Manifest>("update/manifest", ct);
             if (manifest == null) return;
-            DbVersionStore.WriteVersions(Path.Combine(DataDir, "db-versions-server.json"),
-                new Dictionary<string, string?>
-                {
-                    ["botip"]    = manifest.IpBase?.Version,
-                    ["urlcache"] = manifest.UrlCache?.Version,
-                    ["byod"]     = manifest.Byod?.Version,
-                });
+            StoreManifestVersions(manifest);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { Log($"extra list versions unavailable: {ex.Message}"); }
     }
 
-    private static void BumpLocalVersionIfChanged(string path, byte[] fresh, string versionKey)
-    {
-        try
-        {
-            if (File.Exists(path))
-            {
-                var current = File.ReadAllBytes(path);
-                if (current.Length == fresh.Length && current.AsSpan().SequenceEqual(fresh)) return;
-            }
-            DbVersionStore.BumpLocal(Path.Combine(DataDir, "db-versions-server.json"), versionKey);
-        }
-        catch { }
-    }
-
     private async Task DownloadExtraListsAsync(Action<ProgressEvent> progress, CancellationToken ct)
     {
         Directory.CreateDirectory(DataDir);
-
-        using var http = new HttpClient(Malward.Engine.Cloud.CertPinning.Handler(_certPin, Log))
-        { Timeout = TimeSpan.FromSeconds(60) };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("Malward/0.4 (+https://malward)");
 
         await StoreExtraListVersionsAsync(ct);
 
@@ -790,30 +796,30 @@ public sealed class UpdateService
         try
         {
             progress(new ProgressEvent("extras", "busy", 0, 0, 0, 0, 0, "Pobieram listę zablokowanych certyfikatów…", "urls"));
-            var raw = await http.GetStringAsync(CscbCertsUrl, ct);
+            var certs = await _http.GetStringAsync("update/certs", ct);
+
             var fps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var line in raw.Split('\n'))
+            foreach (var line in certs.Split('\n'))
             {
                 var l = line.Trim();
-                if (l.Length == 0 || l.StartsWith('#')) continue;
-                if (l.StartsWith("\"time_stamp", StringComparison.OrdinalIgnoreCase)) continue;
-                foreach (var field in l.Split(','))
-                {
-                    var f = field.Trim().Trim('"');
-                    if (f.Length == 64 && IsHex(f)) { fps.Add(f.ToLowerInvariant()); break; }
-                }
+                if (l.Length == 64 && IsHex(l)) fps.Add(l.ToLowerInvariant());
             }
+
             if (fps.Count > 0)
             {
-                var certPath = Path.Combine(DataDir, "vps-ex02.vdeb");
-                var certBody = string.Join("\n", fps);
-                BumpLocalVersionIfChanged(certPath,
-                    System.Text.Encoding.UTF8.GetBytes(certBody), "cert");
-                AtomicWrite(certPath, certBody);
+                AtomicWrite(Path.Combine(DataDir, "vps-ex02.vdeb"), string.Join("\n", fps));
+                Log($"certificate blocklist: {fps.Count} thumbprint(s) stored");
+            }
+            else
+            {
+                Log($"certificate blocklist: the server returned no thumbprints ({certs.Length} bytes)");
             }
         }
         catch (OperationCanceledException) { throw; }
-        catch { }
+        catch (Exception ex)
+        {
+            Log($"certificate blocklist download failed: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private static bool IsIpv4(string s)

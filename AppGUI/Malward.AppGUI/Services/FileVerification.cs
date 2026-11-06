@@ -41,7 +41,7 @@ public static class FileVerification
         var heurScanner = Path.Combine(engineDir, "heurscanner.exe");
         if (!File.Exists(heurScanner))
             issues.Add(new VerificationIssue("heurscanner.exe",
-                "Brak heurscanner.exe (yara) — heurystyka YARA wyłączona.", false));
+                "Brak heurscanner.exe — heurystyka wyłączona.", false));
 
         var appDataDbDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
