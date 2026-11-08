@@ -15,7 +15,6 @@ Malward is a free, second-opinion antivirus scanner — it runs alongside your p
 ### Important Product Information
 The program features real-time protection mechanisms that can be enabled. However, these protections are not tied to deep system integration, the so-called **kernel driver**, which would grant the program direct access to block threats in real time. The program uses all available system methods to maintain the highest possible level of security, although full protection is not guaranteed. It is best used in combination with another security suite, such as Windows Defender. The cloud analysis system scans files by sending them to our analysis server, which utilizes four scanning engines to increase coverage and detection. The uploaded file is analyzed and immediately deleted after the analysis is complete. A version of the program without protection mechanisms and additional tools is also available, offering on-demand scanning only.
 
-## 
 
 ## Table of Contents
 
