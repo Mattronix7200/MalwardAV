@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Security.AccessControl;
 using System.Security.Principal;
 
@@ -338,12 +338,46 @@ public static class InstallFolderGuard
 
     public static (bool ok, string detail) Remove(string dir)
     {
-        Icacls($"\"{dir}\" /setowner {SidAdmins} /C /Q");
+        if (CanWriteInto(dir))
+        {
+            try { if (File.Exists(MarkerPath)) File.Delete(MarkerPath); } catch { }
+            return (true, "");
+        }
+
+        // Przejecie wlasnosci musi objac TAKZE pliki (/T): wlasciciel ma WRITE_DAC niezaleznie
+        // od listy uprawnien, a bez tego /reset nie ma prawa ruszyc ich ACL. Osobno zdejmowany
+        // jest wpis DENY dla Wszyscy, bo /reset na katalogu nie usuwa go z dzieci.
+        Icacls($"\"{dir}\" /setowner {SidAdmins} /T /C /Q");
+        Icacls($"\"{dir}\" /remove:d {SidEveryone} /T /C /Q");
+        Icacls($"\"{dir}\" /grant {SidAdmins}:(OI)(CI)(F) /T /C /Q");
+        Icacls($"\"{dir}\" /grant {SidSystem}:(OI)(CI)(F) /T /C /Q");
         var (rc, o) = Icacls($"\"{dir}\" /reset /T /C /Q");
-        if (rc != 0) return (false, o);
         Icacls($"\"{dir}\" /inheritance:e");
+
+        // Rozstrzyga zapis, nie kod wyjscia: icacls z /C konczy sie zerem takze wtedy, gdy
+        // pominal czesc plikow po bledzie.
+        if (!CanWriteInto(dir))
+            return (false, rc != 0 ? o : $"{dir} nadal jest tylko do odczytu");
+
         try { if (File.Exists(MarkerPath)) File.Delete(MarkerPath); } catch { }
         return (true, "");
+    }
+
+    private static bool CanWriteInto(string dir)
+    {
+        if (!Directory.Exists(dir)) return true;
+        var probe = Path.Combine(dir, ".malward-guard-probe");
+        try
+        {
+            File.WriteAllBytes(probe, new byte[] { 0 });
+            File.Delete(probe);
+            return true;
+        }
+        catch
+        {
+            try { if (File.Exists(probe)) File.Delete(probe); } catch { }
+            return false;
+        }
     }
 
     private static (int rc, string output) Icacls(string args)

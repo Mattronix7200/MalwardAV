@@ -296,7 +296,8 @@ public static class BehaviorAnalyzer
         int sameName = children.Count(c =>
             NameCore(c.Name).Equals(ownCore, StringComparison.OrdinalIgnoreCase));
 
-        if (sameName >= 3)
+        if (sameName >= SelfReplicationThreshold && !IsOsSpawnedHelper(ownCore)
+            && !IsTrustedOrReputable(proc))
         {
             alerts.Add(new BehaviorAlert(proc.Pid, proc.Name, BehaviorSeverity.High, "SelfReplication",
                 $"Proces spawnuje {sameName} kopii samego siebie ({proc.Name})"));
@@ -725,6 +726,17 @@ un") || cmd.Contains("userinit")
 
     private static readonly Dictionary<string, string?> OriginalNameCache =
         new(StringComparer.OrdinalIgnoreCase);
+
+    private const int SelfReplicationThreshold = 3;
+
+    // Procesy, ktore mnozy SYSTEM, a nie program. Windows tworzy jeden conhost na kazda
+    // konsole, wiec program uruchamiajacy trzy narzedzia wiersza polecen ma trzy conhosty -
+    // i to nie mowi o nim nic. Tak samo dllhost (jeden na aktywacje COM+) i WerFault.
+    private static readonly HashSet<string> OsSpawnedHelpers =
+        new(StringComparer.OrdinalIgnoreCase)
+        { "conhost", "dllhost", "werfault", "wermgr", "backgroundtaskhost", "runtimebroker" };
+
+    private static bool IsOsSpawnedHelper(string nameCore) => OsSpawnedHelpers.Contains(nameCore);
 
     private static string NameCore(string name)
     {
