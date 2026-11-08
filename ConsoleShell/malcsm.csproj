@@ -13,12 +13,12 @@
     <ApplicationIcon>..\Extras\icon.ico</ApplicationIcon>
     <NoWarn>$(NoWarn);CA1416</NoWarn>
 
-    <AssemblyTitle>Malward Command Shell</AssemblyTitle>
-    <Product>Malward Command Shell Manager</Product>
+    <AssemblyTitle>Malward Command Tool Utility</AssemblyTitle>
+    <Product>Malward Command Tool Utility</Product>
     <Company>jmSOFT</Company>
     <Authors>Community Edition</Authors>
     <Copyright>Copyright (c) 2026 jmSOFT</Copyright>
-    <Description>Malward Command Shell Manager</Description>
+    <Description>Malward Cloud Scanner - portable command tool utility</Description>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\EngineSDK\Malward.Engine\Malward.Engine.csproj" />

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Malward.Engine.Config;
 using Malward.Engine.Core;
 using Malward.Engine.Repair;
@@ -5,202 +6,15 @@ using Malward.Engine.Util;
 
 namespace Malward.ConsoleShell;
 
-/// <summary>The /scan shell: builds settings from switches only, never from the GUI configuration.
-/// Only the local signature database and the file whitelist are on by default; every other layer
-/// has to be asked for, so each switch on the command line actually changes something.</summary>
 public static class ScanShell
 {
-    private enum FixMode { Quarantine, Delete, Ask, Ignore }
-
-    /// <summary>A size no real file reaches, used where the engine wants a number but the user
-    /// asked for no limit at all.</summary>
-    private const int NoLimitMb = 1_000_000;
-
-    private const int MaxNesting = 12;
-
-    private static string Limit(int? value) => value.HasValue ? value.Value + " MB" : "unlimited";
-
-    public static int Run(CommandLine cl)
+    private sealed class StopFlag
     {
-        var settings = new Settings();
+        private volatile bool _requested;
+        private volatile bool _done;
 
-        bool quick  = cl.Has("q", "quick");
-        bool full   = cl.Has("f", "full");
-        bool custom = cl.Has("c", "custom");
-
-        settings.MemoryScan               = cl.Flag(false, "m", "memory");
-        settings.ScanArchives             = cl.Flag(false, "a", "archive");
-        settings.HeuristicEnabled         = cl.Flag(false, "h", "heur");
-
-        settings.CloudScanEnabled         = cl.Flag(false, "cs", "enable-cloud-scan");
-        settings.CloudVerifyDetections    = cl.Flag(false, "cv", "enable-cloud-verify");
-        settings.ScanOptimization         = cl.Flag(false, "cc", "use-cloud-cache");
-        settings.SkipMsSigned             = cl.Flag(false, "ss", "skip-signed");
-
-        int? fileLimit    = cl.Number("mfs", "max-file-size");
-        int? archiveLimit = cl.Number("amfs", "archive-max-file-size");
-        int? nesting      = cl.Number("amn", "archive-max-nesting");
-
-        settings.MaxFileSizeMb        = fileLimit    ?? NoLimitMb;
-        settings.MaxUploadToCloudSec  = cl.Number("mct", "max-cloud-time")  ?? 30;
-        settings.MaxScanTimePerFileSec = cl.Number("mut", "max-upload-time") ?? 60;
-        settings.ArchiveMaxSizeMb     = archiveLimit ?? NoLimitMb;
-        settings.ArchiveMaxDepth      = nesting      ?? MaxNesting;
-
-        int threads = cl.Number("t", "threads") ?? 0;
-        if (threads <= 0) threads = Environment.ProcessorCount;
-        settings.ScanMaxParallelism = threads;
-
-        int cpuLimit = cl.Number("cpu", "cpu-limit") ?? 100;
-        settings.ScanCpuLimitPercent = cpuLimit;
-
-        bool autoReport = cl.Has("log", "log-output");
-
-        if (!ApplyExtensionFilter(cl, settings)) return 2;
-
-        var fix = ResolveFixMode(cl, out string? fixError);
-        if (fixError != null) { Con.ErrorLine("[!] " + fixError); return 2; }
-        settings.RepairMode = fix switch
-        {
-            FixMode.Quarantine => 2,
-            FixMode.Delete     => 3,
-            _                  => 1,
-        };
-        settings.ArchiveRepairMode = ResolveArchiveFix(cl);
-
-        bool degraded = false;
-        if (fix is FixMode.Quarantine or FixMode.Delete or FixMode.Ask && !Elevation.IsAdministrator)
-        {
-            Elevation.WarnNotElevated("moving threats to quarantine or deleting them");
-            Con.ErrorLine("    The scan continues in detect-only mode.");
-            fix = FixMode.Ignore;
-            settings.RepairMode = 1;
-            degraded = true;
-        }
-
-        ScanPlan plan;
-        if (full) plan = ScanPlan.Full();
-        else if (quick) plan = ScanPlan.Quick();
-        else if (custom)
-        {
-            var targets = cl.Positional();
-            if (targets.Count == 0)
-            {
-                Con.ErrorLine("[!] /custom needs a path: malcsm /scan /c \"C:\\folder\"");
-                return 2;
-            }
-            plan = ScanPlan.SingleTarget(targets[0]);
-            for (int i = 1; i < targets.Count; i++)
-                plan.Folders.Add(new ScanPlan.FolderTarget(targets[i], Array.Empty<string>()));
-        }
-        else
-        {
-            Con.ErrorLine("[!] Pick a mode: /q (quick), /f (full) or /c <path> (custom).");
-            return 2;
-        }
-
-        plan.Memory = settings.MemoryScan;
-
-        string limits = "file " + Limit(fileLimit) + "   archive " + Limit(archiveLimit)
-                        + "   nesting " + (nesting?.ToString() ?? MaxNesting.ToString());
-
-        if (!DatabasesReady()) return 5;
-
-        return Execute(plan, settings, fix, autoReport, degraded, limits);
-    }
-
-    /// <summary>Without the signature database a scan reports nothing and looks like a clean
-    /// result, which is worse than refusing to run.</summary>
-    private static bool DatabasesReady()
-    {
-        var missing = DatabaseInfo.Required.Where(e => !DatabaseInfo.Installed(e)).ToList();
-        if (missing.Count == 0) return true;
-
-        Con.Banner("");
-        Con.Line("No detection databases installed.", Tone.Warn);
-        Con.Line();
-        foreach (var e in missing) Con.Line($"  missing: {e.Name} ({e.FileName})", Tone.Dim);
-        Con.Line();
-        Con.Line("Run  malcsm.exe /update  first.", Tone.Info);
-        return false;
-    }
-
-    private static bool ApplyExtensionFilter(CommandLine cl, Settings settings)
-    {
-        var values = cl.ValuesAfter("ext", "extension-list");
-        if (values.Count == 0) { settings.ExtFilterMode = "all"; return true; }
-
-        if (values[0] == "0") { settings.ExtFilterMode = "common"; return true; }
-        if (values[0] == "1") { settings.ExtFilterMode = "all"; return true; }
-        if (values[0] == "2")
-        {
-            settings.ExtFilterMode = "blacklist";
-            settings.ExtBlacklist = values.Skip(1).Select(Clean).Where(v => v.Length > 0).ToList();
-            if (settings.ExtBlacklist.Count == 0)
-            {
-                Con.ErrorLine("[!] /ext 2 needs a list of extensions to exclude.");
-                return false;
-            }
-            return true;
-        }
-
-        settings.ExtFilterMode = "common";
-        settings.ExtListCommon = values.Select(Clean).Where(v => v.Length > 0).ToList();
-        return true;
-
-        static string Clean(string v) => v.Trim().TrimStart('.', '*').ToLowerInvariant();
-    }
-
-    private static FixMode ResolveFixMode(CommandLine cl, out string? error)
-    {
-        error = null;
-        if (cl.Has("fix-quar")) return FixMode.Quarantine;
-        if (cl.Has("fix-del"))  return FixMode.Delete;
-        if (cl.Has("fix-ask"))  return FixMode.Ask;
-        if (cl.Has("fix-ignore")) return FixMode.Ignore;
-
-        var n = cl.Value("fix");
-        if (n != null)
-        {
-            switch (n.Trim().ToLowerInvariant())
-            {
-                case "1": case "quar": return FixMode.Quarantine;
-                case "2": case "del":  return FixMode.Delete;
-                case "3": case "ask":  return FixMode.Ask;
-                case "4": case "ignore": return FixMode.Ignore;
-                default: error = $"unknown repair mode: {n} (use 1..4 or quar/del/ask/ignore)"; return FixMode.Quarantine;
-            }
-        }
-
-        return cl.Flag(false, "auto", "autofix") ? FixMode.Quarantine : FixMode.Ignore;
-    }
-
-    private static int ResolveArchiveFix(CommandLine cl)
-    {
-        if (cl.Has("archive-fix-copy")) return 1;
-        if (cl.Has("archive-fix-del"))  return 2;
-        var n = cl.Value("afix");
-        return n?.Trim().ToLowerInvariant() switch
-        {
-            "1" or "copy" => 1,
-            "2" or "del"  => 2,
-            _ => 1,
-        };
-    }
-
-    private const int LogLines = 6;
-
-    /// <summary>Everything in the frame except the log rows.</summary>
-    private const int FrameOverhead = 25;
-
-    private static int LogCapacityForWindow()
-    {
-        try
-        {
-            if (Console.IsOutputRedirected) return LogLines;
-            return Math.Clamp(Console.WindowHeight - 1 - FrameOverhead, 1, LogLines);
-        }
-        catch { return LogLines; }
+        public bool Requested { get => _requested; set => _requested = value; }
+        public bool Done { get => _done; set => _done = value; }
     }
 
     private sealed class Finding
@@ -216,126 +30,23 @@ public static class ScanShell
 
         public string Action = "none";
         public string Detail = "";
-
         public string RegistryLocation = "";
         public bool RegistryOnly;
     }
 
-    private sealed class Status
-    {
-        public string Memory = "";
-        public string Stage = "Starting...";
-        public DateTime Started = DateTime.Now;
-        public string Vps = "";
-        public string Cloud = "";
-        public string Current = "";
-        public string Profile = "";
-        public string Layers = "";
-        public string Limits = "";
-        public int LogCapacity = LogLines;
-        public int Scanned, Infections, Errors, Total;
-        public bool Counting = true;
-        public bool Finished;
-
-        private readonly List<(string Text, Tone Tone)> _log = new();
-        private readonly List<string> _full = new();
-
-        public IReadOnlyList<string> FullLog { get { lock (_log) return _full.ToArray(); } }
-
-        public void Log(string line, Tone tone = Tone.Plain)
-        {
-            line = line.TrimEnd();
-            if (line.Length == 0) return;
-            if (IsNoise(line)) return;
-            lock (_log)
-            {
-                _log.Add((line, tone == Tone.Plain ? ToneOf(line) : tone));
-                while (_log.Count > LogCapacity) _log.RemoveAt(0);
-                if (_full.Count < 20000) _full.Add(line);
-            }
-        }
-
-        /// <summary>Which database format was loaded is engine bookkeeping, not scan output.</summary>
-        private static bool IsNoise(string line)
-            => line.Contains("database loaded", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("Whitelist loaded", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("heuristic rules loaded", StringComparison.OrdinalIgnoreCase);
-
-        private static Tone ToneOf(string line)
-        {
-            if (line.StartsWith("[i]", StringComparison.Ordinal)) return Tone.Dim;
-            if (line.StartsWith("[+]", StringComparison.Ordinal)) return Tone.Info;
-            if (line.Contains("Heur", StringComparison.OrdinalIgnoreCase)) return Tone.Heuristic;
-            if (line.StartsWith("[!]", StringComparison.Ordinal)) return Tone.Warn;
-            return Tone.Plain;
-        }
-
-        private List<(string Text, Tone Tone)> LogSnapshot()
-        {
-            lock (_log) return new List<(string, Tone)>(_log);
-        }
-
-        public IReadOnlyList<StatusLine> Lines()
-        {
-            var bar = new string('_', 22);
-            var l = new List<StatusLine>
-            {
-                new(Memory, Tone.Info),
-                new($"Status: {(Infections > 0 ? "Threats detected" : "OK")}",
-                    Infections > 0 ? Tone.Threat : Tone.Dim),
-                "",
-                new($"Stage: {Stage}", Tone.Info),
-                new($"Scan started at: {Started:yyyy-MM-dd HH:mm:ss}", Tone.Dim),
-                new($"VPS Version: {Vps}", Tone.Dim),
-                new($"Cloud: {Cloud}", Cloud == "Unavailable" ? Tone.Warn : Tone.Dim),
-                new($"Profile: {Profile}", Tone.Dim),
-                new($"Layers: {Layers}", Tone.Dim),
-                new($"Limits: {Limits}", Tone.Dim),
-                "",
-                new(bar, Tone.Dim),
-                "",
-                new($"Actually scanning: {Current}", Tone.Plain),
-                new($"Scanned: {Scanned}" + (Counting || Total <= 0 ? "" : $" of {Total}"), Tone.Plain),
-                new($"Infections: {Infections}", Infections > 0 ? Tone.Threat : Tone.Plain),
-                new($"Errors: {Errors}", Errors > 0 ? Tone.Warn : Tone.Plain),
-                new(bar, Tone.Dim),
-                "",
-                new("Log data:", Tone.Dim),
-                "",
-            };
-
-            var log = LogSnapshot();
-            for (int i = 0; i < LogCapacity; i++)
-                l.Add(i < log.Count ? new StatusLine("  " + log[i].Text, log[i].Tone) : "");
-
-            l.Add("");
-            l.Add(new StatusLine(bar, Tone.Dim));
-            l.Add("");
-            l.Add(new StatusLine($"Completed: {Percent():F1}%", Tone.Info));
-            return l;
-        }
-
-        public double Percent()
-        {
-            if (Finished) return 100;
-            if (Counting || Total <= 0) return 0;
-            return Math.Min(100.0, Scanned * 100.0 / Total);
-        }
-    }
-
     private sealed class LogSink : TextWriter
     {
-        private readonly Status _status;
-        private readonly System.Text.StringBuilder _buf = new();
+        private readonly ScanView _view;
+        private readonly System.Text.StringBuilder _buffer = new();
 
-        public LogSink(Status status) { _status = status; }
+        public LogSink(ScanView view) => _view = view;
 
         public override System.Text.Encoding Encoding => System.Text.Encoding.UTF8;
 
         public override void Write(char value)
         {
             if (value == '\n') { Flush(); return; }
-            if (value != '\r') lock (_buf) _buf.Append(value);
+            if (value != '\r') lock (_buffer) _buffer.Append(value);
         }
 
         public override void Write(string? value)
@@ -347,308 +58,785 @@ public static class ScanShell
         public override void Flush()
         {
             string text;
-            lock (_buf)
+            lock (_buffer)
             {
-                if (_buf.Length == 0) return;
-                text = _buf.ToString();
-                _buf.Clear();
+                if (_buffer.Length == 0) return;
+                text = _buffer.ToString().TrimEnd();
+                _buffer.Clear();
             }
-            _status.Log(text);
+            if (text.Length == 0 || IsNoise(text)) return;
+            _view.Note(text);
         }
+
+        private static bool IsNoise(string line)
+            => line.Contains("database loaded", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Whitelist loaded", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("heuristic rules loaded", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static int Execute(ScanPlan plan, Settings settings, FixMode fix,
-                               bool autoReport, bool degraded, string limits)
+    public static int Run(CommandLine cl)
     {
-        Con.Banner($"{plan.Name} scan");
+        var options = ScanOptions.Load();
+        options.ApplyCommandLine(cl);
 
-        var real = Console.Out;
-        var status = new Status
-        {
-            Vps = DatabaseInfo.SignatureLine(),
-            Cloud = settings.CloudScanEnabled ? "Checking..." : "Disabled",
-            Memory = plan.Memory ? "Scanning memory..." : "Memory scan skipped.",
-            LogCapacity = LogCapacityForWindow(),
-        };
-        var screen = new StatusBlock(real);
-        var drawGate = new object();
+        if (!ApplyExtensionFilter(cl, options)) return 2;
+        if (!ApplyFixMode(cl, options)) return 2;
 
-        void Draw(bool force = false)
+        if (cl.Has("c", "custom"))
         {
-            if (!Monitor.TryEnter(drawGate)) return;
-            try { screen.Render(status.Lines(), force); }
-            finally { Monitor.Exit(drawGate); }
+            Con.ErrorLine("[!] /c was removed. Give the path on its own:");
+            Con.ErrorLine("      malcsm /scan \"D:\\data\"", Tone.Info);
+            return 2;
         }
 
-        if (settings.CloudScanEnabled) ProbeCloud(settings, status);
+        bool quick = cl.Has("q", "quick");
+        bool full = cl.Has("f", "full");
+        var targets = cl.Positional();
 
-        status.Profile = $"{plan.Name} scan   repair: {fix.ToString().ToLowerInvariant()}   "
-                         + $"threads: {settings.ScanMaxParallelism}";
-        status.Layers = LayerSummary(plan, settings);
-        status.Limits = limits;
+        if (quick && full)
+        {
+            Con.ErrorLine("[!] Pick one mode: /q or /f.");
+            return 2;
+        }
 
-        var excluded = ExclusionShell.Load();
-        if (excluded.Count > 0) status.Log($"[i] {excluded.Count} exclusion(s) in effect");
-        if (degraded) status.Log("[!] detect-only: the console is not elevated");
-        Draw(true);
+        ScanPlan plan;
+        if (full) plan = ScanPlan.Full();
+        else if (quick) plan = ScanPlan.Quick();
+        else if (targets.Count > 0)
+        {
+            plan = TargetPlan(targets, out var bad);
+            if (bad != null) { Con.ErrorLine("[!] " + bad); return 2; }
+        }
+        else
+        {
+            Con.ErrorLine("[!] Nothing to scan. Use /q (quick), /f (full)");
+            Con.ErrorLine("    or give a path:  malcsm /scan \"D:\\data\"", Tone.Info);
+            return 2;
+        }
 
-        using var sink = new LogSink(status);
-        using var errors = new ErrorScope(sink);
+        return Start(plan, options, interactive: false);
+    }
+
+    public static ScanPlan TargetPlan(IReadOnlyList<string> targets, out string? error)
+    {
+        error = null;
+        var plan = new ScanPlan { Name = "custom" };
+        foreach (var raw in targets)
+        {
+            var target = raw.Trim().Trim('"');
+            if (target.Length == 0) continue;
+
+            string full;
+            try { full = System.IO.Path.GetFullPath(target); }
+            catch (Exception ex) { error = $"{target}: {ex.Message}"; return plan; }
+
+            if (!File.Exists(full) && !Directory.Exists(full))
+            {
+                error = $"{full} does not exist.";
+                return plan;
+            }
+            plan.Folders.Add(new ScanPlan.FolderTarget(full, Array.Empty<string>()));
+        }
+
+        if (plan.Folders.Count == 0) error = "no usable path given.";
+        return plan;
+    }
+
+    public static int Start(ScanPlan plan, ScanOptions options, bool interactive)
+    {
+        if (!DatabasesReady(interactive)) return 5;
+        return Execute(plan, options, interactive);
+    }
+
+    private static bool ApplyFixMode(CommandLine cl, ScanOptions options)
+    {
+        if (cl.Has("fix-quar")) { options.Fix = FixMode.Quarantine; return true; }
+        if (cl.Has("fix-del")) { options.Fix = FixMode.Delete; return true; }
+        if (cl.Has("fix-ask")) { options.Fix = FixMode.Ask; return true; }
+        if (cl.Has("fix-ignore")) { options.Fix = FixMode.Report; return true; }
+
+        var value = cl.Value("fix");
+        if (value != null)
+        {
+            switch (value.Trim().ToLowerInvariant())
+            {
+                case "1": case "quar": options.Fix = FixMode.Quarantine; return true;
+                case "2": case "del": options.Fix = FixMode.Delete; return true;
+                case "3": case "ask": options.Fix = FixMode.Ask; return true;
+                case "4": case "ignore": options.Fix = FixMode.Report; return true;
+                default:
+                    Con.ErrorLine($"[!] unknown repair mode: {value} (use 1..4 or quar/del/ask/ignore)");
+                    return false;
+            }
+        }
+
+        if (cl.Has("auto", "autofix")) options.Fix = FixMode.Quarantine;
+
+        if (cl.Has("archive-fix-copy")) options.ArchiveFix = ArchiveFixMode.DropEntry;
+        else if (cl.Has("archive-fix-del")) options.ArchiveFix = ArchiveFixMode.DeleteArchive;
+        else
+        {
+            var afix = cl.Value("afix");
+            if (afix != null)
+                options.ArchiveFix = afix.Trim().ToLowerInvariant() is "2" or "del"
+                    ? ArchiveFixMode.DeleteArchive : ArchiveFixMode.DropEntry;
+        }
+        return true;
+    }
+
+    private static bool ApplyExtensionFilter(CommandLine cl, ScanOptions options)
+    {
+        var values = cl.ValuesAfter("ext", "extension-list");
+        if (values.Count == 0) return true;
+
+        if (values[0] == "0") { options.Extensions = ExtensionMode.Common; options.ExtensionList.Clear(); return true; }
+        if (values[0] == "1") { options.Extensions = ExtensionMode.All; options.ExtensionList.Clear(); return true; }
+        if (values[0] == "2")
+        {
+            var list = values.Skip(1).Select(Clean).Where(v => v.Length > 0).ToList();
+            if (list.Count == 0)
+            {
+                Con.ErrorLine("[!] /ext 2 needs a list of extensions to exclude.");
+                return false;
+            }
+            options.Extensions = ExtensionMode.Blacklist;
+            options.ExtensionList = list;
+            return true;
+        }
+
+        options.Extensions = ExtensionMode.Only;
+        options.ExtensionList = values.Select(Clean).Where(v => v.Length > 0).ToList();
+        return true;
+
+        static string Clean(string v) => v.Trim().TrimStart('.', '*').ToLowerInvariant();
+    }
+
+    private static bool DatabasesReady(bool interactive)
+    {
+        var missing = DatabaseInfo.Required.Where(e => !DatabaseInfo.Installed(e)).ToList();
+        if (missing.Count == 0) return true;
+
+        if (interactive)
+        {
+            var screen = new Screen();
+            screen.Clear();
+            screen.Sidebar(SidebarInfo());
+            int y = screen.ContentTop;
+            screen.Put(screen.ContentLeft, y++, "NO DETECTION DATABASES", Tone.Warn);
+            screen.Rule(screen.ContentLeft, y++, screen.ContentWidth);
+            foreach (var e in missing)
+                screen.Put(screen.ContentLeft, y++, "missing: " + e.Name + " (" + e.FileName + ")", Tone.Dim);
+            y++;
+            screen.Put(screen.ContentLeft, y, "Run \"Check for updates\" first. Press any key.", Tone.Info);
+            screen.Flush(true);
+            screen.WaitKey();
+            return false;
+        }
+
+        Con.Banner("");
+        Con.Line("No detection databases installed.", Tone.Warn);
+        Con.Line();
+        foreach (var e in missing) Con.Line($"  missing: {e.Name} ({e.FileName})", Tone.Dim);
+        Con.Line();
+        Con.Line("Run  malcsm.exe /update  first.", Tone.Info);
+        return false;
+    }
+
+    public static SidebarInfo SidebarInfo()
+    {
+        var asm = System.Reflection.Assembly.GetExecutingAssembly();
+        var version = asm.GetName().Version;
+        string shown = version == null
+            ? "1.0.0"
+            : $"{version.Major}.{version.Minor}.{version.Build}";
+        var vps = DatabaseInfo.Version("vps");
+        var date = DatabaseInfo.BuildDate(DatabaseInfo.Listed[0]);
+        return new SidebarInfo(shown,
+                               vps.Length == 0 ? "not installed" : vps,
+                               date.Length == 0 ? "never" : date);
+    }
+
+    public static IReadOnlyList<(string Text, Tone Tone)>? BuildWarning(ScanOptions options)
+    {
+        var lines = new List<(string, Tone)>();
+
+        if (!options.CloudScan)
+        {
+            lines.Add(("!  CLOUD SCANNING IS OFF - DETECTION CONFIDENCE IS INCOMPLETE", Tone.Warn));
+            lines.Add(("", Tone.Plain));
+            lines.Add(("Database hits are reported without a second opinion from the cloud", Tone.Plain));
+            lines.Add(("engines, so clean files can be flagged as threats. Turn it back on in", Tone.Plain));
+            lines.Add(("Settings (1) or run with  /cs on", Tone.Dim));
+        }
+        else if (!options.CloudVerify)
+        {
+            lines.Add(("!  CLOUD VERIFICATION IS OFF - FALSE POSITIVES ARE LIKELY", Tone.Warn));
+            lines.Add(("", Tone.Plain));
+            lines.Add(("A database hit is not re-checked against the cloud engines, so a file", Tone.Plain));
+            lines.Add(("the cloud already knows as clean is still reported as a threat.", Tone.Plain));
+            lines.Add(("Turn it back on in Settings (2) or run with  /cv on", Tone.Dim));
+        }
+
+        if (options.Heuristics)
+        {
+            if (lines.Count > 0) lines.Add(("", Tone.Plain));
+            lines.Add(("!  HEURISTIC ANALYSIS IS ON - EXPECT FALSE POSITIVES", Tone.Warn));
+            lines.Add(("", Tone.Plain));
+            lines.Add(("Generic rules judge a file by its shape, not by a known signature.", Tone.Plain));
+            lines.Add(("They work best with cloud scanning left on.", Tone.Dim));
+        }
+
+        return lines.Count == 0 ? null : lines;
+    }
+
+    public static string WarningSummary(ScanOptions options)
+    {
+        var parts = new List<string>();
+        if (!options.CloudScan) parts.Add("cloud scanning OFF");
+        else if (!options.CloudVerify) parts.Add("cloud verification OFF");
+        if (options.Heuristics) parts.Add("heuristics ON");
+        if (parts.Count == 0) return "";
+        return "!  " + string.Join(", ", parts) + " - detections may include false positives";
+    }
+
+    private static int Execute(ScanPlan plan, ScanOptions options, bool interactive)
+    {
+        ConsoleWindow.Enter();
+
+        var settings = options.ToSettings();
+        plan.Memory = options.MemoryScan;
+
+        bool degraded = false;
+        if (options.Fix is FixMode.Quarantine or FixMode.Delete or FixMode.Ask
+            && !Elevation.IsAdministrator)
+        {
+            options.Fix = FixMode.Report;
+            settings.RepairMode = 1;
+            degraded = true;
+        }
+
+        var screen = new Screen();
+        var view = new ScanView(screen, SidebarInfo())
+        {
+            Mode = plan.Name.ToUpperInvariant(),
+            Threads = settings.ScanMaxParallelism,
+            Cloud = options.CloudScan ? "connecting" : "off",
+            CloudEnabled = options.CloudScan,
+            Warning = BuildWarning(options),
+            WarningLine = WarningSummary(options),
+            Stage = "Starting",
+        };
+
+        if (degraded)
+            view.AddError("ELEVATION - the console is not running as administrator, "
+                          + "threats can only be reported");
+
+        var stop = new StopFlag();
+        StartAutoStop(stop);
+        Thread? watcher = StartKeyWatch(stop, screen, view);
+        ConsoleWindow.Busy = true;
+        var painter = view.StartPainter();
+
         var findings = new List<Finding>();
         var findingLock = new object();
+        var reported = new List<Finding>();
         int exit;
 
-        using (ConsoleRouter.Scope(sink))
+        try
         {
-            using var pipeline = new ScanPipeline(settings);
-            sink.Flush();
+            view.Draw(true);
 
-            var driversDone = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var excluded = ExclusionShell.Load();
+            if (excluded.Count > 0) view.Note($"[i] {excluded.Count} exclusion(s) in effect");
 
-            if (plan.Memory)
+            using var sink = new LogSink(view);
+            using var errors = new ErrorScope(sink);
+
+            using (ConsoleRouter.Scope(sink))
             {
-                status.Stage = "Memory Scan";
-                Draw(true);
-                var memory = new Malward.Engine.Memory.ProcessScanner(settings);
-                foreach (var r in memory.ScanRunningProcesses(pipeline))
+                if (options.CloudScan) ProbeCloud(settings, view);
+
+                view.Stage = "Loading detection databases";
+                var pipeline = new ScanPipeline(settings);
+                bool pipelineIdle = true;
+                sink.Flush();
+
+                var done = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                if (plan.Memory && !stop.Requested)
                 {
-                    status.Current = r.Path;
-                    status.Scanned++;
-                    if (r.Verdict == Verdict.Error) { status.Errors++; Draw(); continue; }
-                    if (r.Verdict != Verdict.Malware) { Draw(); continue; }
+                    view.Stage = "Memory scan";
+                    view.Draw(true);
+                    ScanMemory(pipeline, settings, view, findings, findingLock, stop);
+                    sink.Flush();
 
-                    findings.Add(ToFinding(r));
-                    status.Infections++;
-                    status.Log(Describe(r), Tone.Threat);
-                    Draw(true);
+                    if (!stop.Requested)
+                    {
+                        view.Stage = "Registry and startup entries";
+                        view.Draw(true);
+                        ScanRegistry(pipeline, view, findings, findingLock, stop);
+                        sink.Flush();
+                    }
+
+                    if (!stop.Requested)
+                    {
+                        view.Stage = "System drivers";
+                        view.Draw(true);
+                        ScanDrivers(pipeline, view, findings, findingLock, excluded, done, stop);
+                        sink.Flush();
+                    }
                 }
-                sink.Flush();
 
-                status.Stage = "Registry and startup entries";
-                Draw(true);
-                ScanRegistry(pipeline, status, findings, findingLock, Draw);
-                sink.Flush();
+                int already = view.Scanned;
 
-                status.Stage = "System drivers";
-                Draw(true);
-                ScanDrivers(pipeline, status, findings, findingLock, excluded, driversDone, Draw);
-                sink.Flush();
+                view.Stage = "Counting files";
+                view.Draw(true);
+                var files = CollectFiles(plan, excluded, done, stop, view, already);
 
-                status.Memory = "Scanning memory... Done!";
-                status.Current = "";
-                Draw(true);
+                view.Total = already + files.Count;
+                view.Counting = false;
+                view.Current = "";
+                view.Stage = "File scan";
+                view.Draw(true);
+
+                var governor = new CpuGovernor(options.CpuLimit <= 0 ? 100 : options.CpuLimit);
+                if (governor.Active)
+                {
+                    try
+                    {
+                        System.Diagnostics.Process.GetCurrentProcess().PriorityClass =
+                            System.Diagnostics.ProcessPriorityClass.BelowNormal;
+                    }
+                    catch { }
+                }
+
+                int workers = Math.Max(1, settings.ScanMaxParallelism);
+                if (governor.Active) workers = Math.Min(workers, governor.SuggestedThreads);
+                view.Threads = workers;
+
+                int cursor = -1;
+                var scanners = new Thread[workers];
+                for (int i = 0; i < workers; i++)
+                {
+                    scanners[i] = new Thread(() =>
+                    {
+                        if (governor.Active)
+                            try { Thread.CurrentThread.Priority = ThreadPriority.BelowNormal; } catch { }
+
+                        try
+                        {
+                            while (!stop.Requested)
+                            {
+                                int index = Interlocked.Increment(ref cursor);
+                                if (index >= files.Count) break;
+
+                                governor.Throttle();
+                                var file = files[index];
+                                view.Current = file;
+
+                                DetectionResult result;
+                                try { result = pipeline.Scan(file); }
+                                catch (Exception ex)
+                                {
+                                    Interlocked.Increment(ref view.Errors);
+                                    Interlocked.Increment(ref view.Scanned);
+                                    view.AddError(ErrorLine(file, ex.Message));
+                                    continue;
+                                }
+
+                                Interlocked.Increment(ref view.Scanned);
+                                if (result.FileSize > 0) Interlocked.Add(ref view.Bytes, result.FileSize);
+
+                                Record(view, result, findings, findingLock);
+                            }
+                        }
+                        catch { }
+                    })
+                    { IsBackground = true, Name = "malcsm-scan-" + i };
+                    scanners[i].Start();
+                }
+
+                long deadline = 0;
+                foreach (var scanner in scanners)
+                {
+                    try
+                    {
+                        while (!scanner.Join(200))
+                        {
+                            if (!stop.Requested) continue;
+                            if (deadline == 0) deadline = Environment.TickCount64 + StopGraceMs;
+                            if (Environment.TickCount64 < deadline) continue;
+                            pipelineIdle = false;
+                            break;
+                        }
+                    }
+                    catch { pipelineIdle = false; }
+                }
+
+                files.Clear();
+                files.TrimExcess();
+
+                sink.Flush();
+                view.Current = "";
+                view.Stage = stop.Requested ? "Stopped by user" : "Repair";
+                view.Draw(true);
+
+                lock (findingLock) reported = new List<Finding>(findings);
+
+                exit = reported.Count == 0
+                    ? 0
+                    : ApplyRepairs(reported, settings, options, view, interactive);
+
+                if (pipelineIdle) pipeline.Dispose();
             }
-
-            status.Stage = "Building the file list...";
-            Draw(true);
-
-            var files = new List<string>();
-            var seen = new HashSet<string>(driversDone, StringComparer.OrdinalIgnoreCase);
-            foreach (var folder in plan.Folders)
-            {
-                bool skipOwnDir = !IsUnderOwnDirectory(folder.Path);
-                foreach (var file in Walk(folder.Path))
-                {
-                    if (!folder.Matches(file)) continue;
-                    if (skipOwnDir && IsUnderOwnDirectory(file)) continue;
-                    if (IsExcluded(file, excluded)) continue;
-                    if (!seen.Add(file)) continue;
-                    files.Add(file);
-                    if ((files.Count & 1023) == 0) { status.Current = file; Draw(); }
-                }
-            }
-            // Scanned already counts the memory stage, so the target has to include it too.
-            status.Total = files.Count + status.Scanned;
-            status.Counting = false;
-            status.Current = "";
-
-            status.Stage = "File Scan. Ready.";
-            Draw(true);
-
-            var options = new ParallelOptions { MaxDegreeOfParallelism = settings.ScanMaxParallelism };
-            Parallel.ForEach(files, options, file =>
-            {
-                status.Current = file;
-
-                DetectionResult r;
-                try { r = pipeline.Scan(file); }
-                catch (Exception ex)
-                {
-                    Interlocked.Increment(ref status.Errors);
-                    Interlocked.Increment(ref status.Scanned);
-                    status.Log($"[!] {file}: {ex.Message}");
-                    Draw();
-                    return;
-                }
-
-                Interlocked.Increment(ref status.Scanned);
-
-                if (r.Verdict == Verdict.Error)
-                {
-                    Interlocked.Increment(ref status.Errors);
-                    status.Log($"[!] {file}: {(string.IsNullOrEmpty(r.Error) ? "scan error" : r.Error)}");
-                    Draw();
-                    return;
-                }
-
-                if (r.Verdict == Verdict.Malware)
-                {
-                    lock (findingLock) findings.Add(ToFinding(r));
-                    Interlocked.Increment(ref status.Infections);
-                    status.Log(Describe(r), Tone.Threat);
-                    Draw(true);
-                    return;
-                }
-
-                Draw();
-            });
-
-            sink.Flush();
-            status.Current = "";
-            status.Stage = findings.Count == 0 ? "Finished. Ready." : "Repair";
-            Draw(true);
-
-            exit = findings.Count == 0
-                ? 0
-                : ApplyRepairs(findings, settings, fix, status, screen, real, Draw);
+        }
+        finally
+        {
+            ConsoleWindow.Busy = false;
+            stop.Done = true;
+            painter.Dispose();
+            try { watcher?.Join(300); } catch { }
         }
 
-        status.Stage = "Finished. Ready.";
-        status.Current = "";
-        status.Finished = true;
-        Draw(true);
-        screen.Release();
+        view.Stopped = stop.Requested;
+        view.Finished = true;
+        view.Stage = stop.Requested ? "Stopped by user" : "Finished";
+        view.Current = "";
+        view.Draw(true);
 
-        FinalScreen(status, findings, plan);
-        Report(status, findings, settings, plan, fix, autoReport);
-        return exit;
+        Finish(view, reported, options, plan, screen, interactive);
+        return stop.Requested && exit == 0 ? 7 : exit;
     }
 
-    private static string LayerSummary(ScanPlan plan, Settings settings)
-        => string.Join("  ", new[]
+    private static void StartAutoStop(StopFlag stop)
+    {
+        var value = Environment.GetEnvironmentVariable("MALWARD_STOP_AFTER_MS");
+        if (!int.TryParse(value, out int delay) || delay <= 0) return;
+
+        new Thread(() =>
         {
-            "whitelist on",
-            "memory " + OnOff(plan.Memory),
-            "archives " + OnOff(settings.ScanArchives),
-            "heuristics " + OnOff(settings.HeuristicEnabled),
-            "cloud " + OnOff(settings.CloudScanEnabled),
-        });
+            Thread.Sleep(delay);
+            stop.Requested = true;
+        })
+        { IsBackground = true, Name = "malcsm-autostop" }.Start();
+    }
 
-    private static Finding ToFinding(DetectionResult r) => new(r);
+    private static Thread? StartKeyWatch(StopFlag stop, Screen screen, ScanView view)
+    {
+        if (!screen.Live) return null;
+        try { if (Console.IsInputRedirected) return null; }
+        catch { return null; }
 
-    /// <summary>Autostart entries, services and the other registry load points the graphical
-    /// scanner walks: the referenced file is scanned, and the entry itself is judged on its shape.
-    /// </summary>
-    private static void ScanRegistry(ScanPipeline pipeline, Status status, List<Finding> findings,
-                                     object findingLock, Action<bool> draw)
+        var thread = new Thread(() =>
+        {
+            while (!stop.Done)
+            {
+                try
+                {
+                    if (Console.KeyAvailable)
+                    {
+                        var key = Console.ReadKey(true);
+                        if (key.Key is ConsoleKey.Q or ConsoleKey.Escape) stop.Requested = true;
+                    }
+                    if (ConsoleWindow.ClearInterruptFlag())
+                    {
+                        view.Note("[i] Ctrl+C was blocked while the scan was running - press [Q] to stop it.");
+                    }
+                }
+                catch { return; }
+                Thread.Sleep(70);
+            }
+        })
+        { IsBackground = true, Name = "malcsm-keys" };
+        thread.Start();
+        return thread;
+    }
+
+    private static IEnumerable<string> EnumerateFolder(ScanPlan.FolderTarget folder,
+                                                       List<string> excluded,
+                                                       ConcurrentDictionary<string, byte> seen,
+                                                       StopFlag stop)
+    {
+        bool skipOwn = !IsUnderOwnDirectory(folder.Path);
+        foreach (var file in Walk(folder.Path))
+        {
+            if (stop.Requested) yield break;
+            if (!folder.Matches(file)) continue;
+            if (skipOwn && IsUnderOwnDirectory(file)) continue;
+            if (IsExcluded(file, excluded)) continue;
+            if (!seen.TryAdd(file, 0)) continue;
+            yield return file;
+        }
+    }
+
+    private const int MaxListers = 4;
+
+    private const int StopGraceMs = 2500;
+
+    private static List<string> CollectFiles(ScanPlan plan, List<string> excluded,
+                                             HashSet<string> done, StopFlag stop,
+                                             ScanView view, int already)
+    {
+        var seen = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in done) seen.TryAdd(path, 0);
+
+        int count = Math.Max(1, Math.Min(MaxListers, plan.Folders.Count));
+        int next = -1;
+        int found = 0;
+
+        var buckets = new List<string>[count];
+        var listers = new Thread[count];
+
+        for (int i = 0; i < count; i++)
+        {
+            int slot = i;
+            buckets[slot] = new List<string>();
+            listers[slot] = new Thread(() =>
+            {
+                var bucket = buckets[slot];
+                try
+                {
+                    while (!stop.Requested)
+                    {
+                        int index = Interlocked.Increment(ref next);
+                        if (index >= plan.Folders.Count) break;
+
+                        var folder = plan.Folders[index];
+                        view.Current = folder.Path;
+
+                        foreach (var file in EnumerateFolder(folder, excluded, seen, stop))
+                        {
+                            bucket.Add(file);
+                            int n = Interlocked.Increment(ref found);
+                            view.Total = already + n;
+                            if ((n & 1023) == 0) view.Current = file;
+                        }
+                    }
+                }
+                catch { }
+            })
+            { IsBackground = true, Name = "malcsm-list-" + slot };
+            listers[slot].Start();
+        }
+
+        long deadline = 0;
+        var usable = new bool[count];
+        for (int i = 0; i < count; i++)
+        {
+            usable[i] = true;
+            try
+            {
+                while (!listers[i].Join(200))
+                {
+                    if (!stop.Requested) continue;
+                    if (deadline == 0) deadline = Environment.TickCount64 + StopGraceMs;
+                    if (Environment.TickCount64 < deadline) continue;
+                    usable[i] = false;
+                    break;
+                }
+            }
+            catch { usable[i] = false; }
+        }
+
+        var files = new List<string>(found);
+        for (int i = 0; i < count; i++)
+            if (usable[i]) files.AddRange(buckets[i]);
+        return files;
+    }
+
+    private static bool Record(ScanView view, DetectionResult result,
+                               List<Finding> findings, object findingLock)
+    {
+        if (result.Verdict == Verdict.Error)
+        {
+            Interlocked.Increment(ref view.Errors);
+            view.AddError(ErrorLine(result.Path,
+                string.IsNullOrEmpty(result.Error) ? "scan error" : result.Error));
+            return false;
+        }
+
+        if (result.Verdict == Verdict.Skipped && IsReportableSkip(result.Source))
+        {
+            Interlocked.Increment(ref view.Errors);
+            view.AddError(SkipLine(result));
+            return false;
+        }
+
+        if (result.Verdict != Verdict.Malware) return false;
+
+        lock (findingLock) findings.Add(new Finding(result));
+        Interlocked.Increment(ref view.Infections);
+        if (result.Source == ScanPipeline.UnverifiedSource)
+            Interlocked.Increment(ref view.Unverified);
+        view.AddDetection(result.Detection ?? "unknown",
+                          result.ArchiveEntry is { Length: > 0 } entry
+                              ? result.Path + " >> " + entry
+                              : result.Path,
+                          Method(result.Source));
+        view.Draw(true);
+        return true;
+    }
+
+    private static bool IsReportableSkip(string? source)
+        => source is "Skipped:blocked" or "Skipped:locked" or "Skipped:encrypted-archive";
+
+    private static string SkipLine(DetectionResult result) => result.Source switch
+    {
+        "Skipped:blocked" => $"FILE - {result.Path} is PROTECTED, CANNOT BE SCANNED RIGHT NOW",
+        "Skipped:locked" => $"FILE - {result.Path} is USED BY ANOTHER PROCESS, CANNOT BE SCANNED",
+        _ => $"FILE - {result.Path} is PROTECTED BY AN ARCHIVE PASSWORD, SKIPPING",
+    };
+
+    private static string ErrorLine(string path, string message)
+        => $"FILE - {path}: {message}";
+
+    public static string Method(string? source)
+    {
+        if (string.IsNullOrEmpty(source)) return "unknown";
+        if (source.StartsWith("Archive:", StringComparison.Ordinal)) return "Archive";
+        if (source.StartsWith("Registry", StringComparison.Ordinal)) return "Registry";
+        return source switch
+        {
+            "VPS" => "Database",
+            "VPS+Cloud" => "Database+Cloud",
+            ScanPipeline.UnverifiedSource => "Database (raw)",
+            ScanPipeline.RescanMalwareSource => "Cloud engines",
+            "Cloud:hash" => "Cloud",
+            "Cloud:scan" => "Cloud engines",
+            "Heur.Generic" => "Heuristics",
+            "Heur:Script" => "Heuristics",
+            "Script" => "Script",
+            "Masquerade" => "Masquerade",
+            "CertBlocklist" => "Certificate",
+            ScanPipeline.ByodSource => "Driver list",
+            _ => source,
+        };
+    }
+
+    private static void ScanMemory(ScanPipeline pipeline, Settings settings, ScanView view,
+                                   List<Finding> findings, object findingLock, StopFlag stop)
+    {
+        var memory = new Malward.Engine.Memory.ProcessScanner(settings);
+        foreach (var result in memory.ScanRunningProcesses(pipeline))
+        {
+            if (stop.Requested) return;
+            view.Current = result.Path;
+            view.Scanned++;
+            if (result.FileSize > 0) view.Bytes += result.FileSize;
+            if (!Record(view, result, findings, findingLock)) view.Draw();
+        }
+        view.Current = "";
+    }
+
+    private static void ScanRegistry(ScanPipeline pipeline, ScanView view, List<Finding> findings,
+                                     object findingLock, StopFlag stop)
     {
         var items = new List<RegistryScanner.Item>();
         try { items.AddRange(RegistryScanner.Collect()); }
-        catch (Exception ex) { status.Log($"[!] registry: {ex.Message}"); }
+        catch (Exception ex) { view.AddError("REGISTRY - " + ex.Message); }
         try
         {
-            foreach (var lp in RegistryLoadPoints.Collect())
-                items.Add(new RegistryScanner.Item(lp.Location, lp.FilePath, lp.Kind));
+            foreach (var point in RegistryLoadPoints.Collect())
+                items.Add(new RegistryScanner.Item(point.Location, point.FilePath, point.Kind));
         }
-        catch (Exception ex) { status.Log($"[!] registry load points: {ex.Message}"); }
+        catch (Exception ex) { view.AddError("REGISTRY - load points: " + ex.Message); }
 
         foreach (var item in items)
         {
-            status.Current = item.Location;
+            if (stop.Requested) return;
+            view.Current = item.Location;
 
-            DetectionResult r;
-            try { r = pipeline.Scan(item.FilePath); }
+            DetectionResult result;
+            try { result = pipeline.Scan(item.FilePath); }
             catch (Exception ex)
             {
-                status.Errors++;
-                status.Log($"[!] {item.Location}: {ex.Message}");
-                draw(false);
+                view.Errors++;
+                view.AddError(ErrorLine(item.Location, ex.Message));
+                view.Draw();
                 continue;
             }
 
-            status.Scanned++;
+            view.Scanned++;
 
-            var shape = r.Verdict == Verdict.Malware ? null : RegistryScanner.ClassifyPersistence(item);
-            if (r.Verdict != Verdict.Malware && shape == null) { draw(false); continue; }
+            var shape = result.Verdict == Verdict.Malware
+                ? null : RegistryScanner.ClassifyPersistence(item);
+            if (result.Verdict != Verdict.Malware && shape == null) { view.Draw(); continue; }
 
-            var effective = r.Verdict == Verdict.Malware
-                ? r
-                : r with { Verdict = Verdict.Malware, Detection = shape!.Detection,
-                           Source = "Registry:heuristic" };
+            var effective = result.Verdict == Verdict.Malware
+                ? result
+                : result with
+                {
+                    Verdict = Verdict.Malware,
+                    Detection = shape!.Detection,
+                    Source = "Registry:heuristic",
+                };
 
-            lock (findingLock) findings.Add(new Finding(effective) { RegistryLocation = item.Location });
-            status.Infections++;
-            status.Log($"[!] {effective.Detection}  {item.Location} -> {item.FilePath}", Tone.Threat);
-            draw(true);
+            lock (findingLock)
+                findings.Add(new Finding(effective) { RegistryLocation = item.Location });
+            view.Infections++;
+            view.AddDetection(effective.Detection ?? "unknown",
+                              item.Location + " -> " + item.FilePath, "Registry");
+            view.Draw(true);
         }
 
         try
         {
             foreach (var indicator in RegistryScanner.CollectIndicators())
             {
+                if (stop.Requested) return;
                 if (!indicator.Artifact) continue;
-                var r = new DetectionResult(indicator.Location, "", Verdict.Malware,
-                                            indicator.Detection, "Registry", 0, 0);
+                var result = new DetectionResult(indicator.Location, "", Verdict.Malware,
+                                                 indicator.Detection, "Registry", 0, 0);
                 lock (findingLock)
-                    findings.Add(new Finding(r)
+                    findings.Add(new Finding(result)
                     {
                         RegistryLocation = indicator.Location,
                         RegistryOnly = true,
                     });
-                status.Infections++;
-                status.Log($"[!] {indicator.Detection}  {indicator.Detail}", Tone.Threat);
-                draw(true);
+                view.Infections++;
+                view.AddDetection(indicator.Detection, indicator.Detail, "Registry");
+                view.Draw(true);
             }
         }
-        catch (Exception ex) { status.Log($"[!] registry indicators: {ex.Message}"); }
+        catch (Exception ex) { view.AddError("REGISTRY - indicators: " + ex.Message); }
 
-        status.Current = "";
+        view.Current = "";
     }
 
-    private static void ScanDrivers(ScanPipeline pipeline, Status status, List<Finding> findings,
+    private static void ScanDrivers(ScanPipeline pipeline, ScanView view, List<Finding> findings,
                                     object findingLock, List<string> excluded,
-                                    HashSet<string> done, Action<bool> draw)
+                                    HashSet<string> done, StopFlag stop)
     {
         var dir = ScanPlan.DriversDir;
         if (!Directory.Exists(dir)) return;
 
         foreach (var file in Walk(dir))
         {
+            if (stop.Requested) return;
             if (IsExcluded(file, excluded)) continue;
             if (!done.Add(file)) continue;
 
-            status.Current = file;
+            view.Current = file;
 
-            DetectionResult r;
-            try { r = pipeline.Scan(file); }
+            DetectionResult result;
+            try { result = pipeline.Scan(file); }
             catch (Exception ex)
             {
-                status.Errors++;
-                status.Log($"[!] {file}: {ex.Message}");
-                draw(false);
+                view.Errors++;
+                view.AddError(ErrorLine(file, ex.Message));
+                view.Draw();
                 continue;
             }
 
-            status.Scanned++;
-
-            if (r.Verdict == Verdict.Error)
-            {
-                status.Errors++;
-                draw(false);
-                continue;
-            }
-            if (r.Verdict != Verdict.Malware) { draw(false); continue; }
-
-            lock (findingLock) findings.Add(ToFinding(r));
-            status.Infections++;
-            status.Log(Describe(r), Tone.Threat);
-            draw(true);
+            view.Scanned++;
+            if (result.FileSize > 0) view.Bytes += result.FileSize;
+            if (!Record(view, result, findings, findingLock)) view.Draw();
         }
 
-        status.Current = "";
+        view.Current = "";
     }
 
-    private static void ProbeCloud(Settings settings, Status status)
+    private static void ProbeCloud(Settings settings, ScanView view)
     {
         Task.Run(() =>
         {
@@ -657,228 +845,264 @@ public static class ScanShell
                 using var client = new Malward.Engine.Cloud.ServerClient(settings);
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
                 client.GetManifestAsync(cts.Token).GetAwaiter().GetResult();
-                status.Cloud = "Connected";
+                view.Cloud = "connected";
             }
-            catch { status.Cloud = "Unavailable"; }
+            catch { view.Cloud = "unavailable"; }
         });
     }
 
-    private static int ApplyRepairs(List<Finding> findings, Settings settings, FixMode fix,
-                                    Status status, StatusBlock screen, TextWriter real,
-                                    Action<bool> draw)
+    private static int ApplyRepairs(List<Finding> findings, Settings settings, ScanOptions options,
+                                    ScanView view, bool interactive)
     {
-        if (fix == FixMode.Ignore)
-        {
-            status.Log("[i] Repair skipped - the threats above were left untouched.");
-            draw(true);
-            return 1;
-        }
+        var fix = options.Fix;
 
         if (fix == FixMode.Ask)
         {
-            screen.Release();
-            real.WriteLine();
-            Con.Line("Choose an action for the threats found:", Tone.Info);
-            Con.Line("  [Q] quarantine   [D] delete   [S] skip", Tone.Dim);
-            real.Write("> ");
-            var key = (Console.ReadLine() ?? "").Trim().ToLowerInvariant();
-            if (key.StartsWith('q')) settings.RepairMode = 2;
-            else if (key.StartsWith('d')) settings.RepairMode = 3;
-            else
-            {
-                status.Log("[i] Repair skipped on request.");
-                draw(true);
-                return 1;
-            }
+            var choice = AskRepair(view);
+            if (choice == FixMode.Report) fix = FixMode.Report;
+            else { fix = choice; settings.RepairMode = choice == FixMode.Delete ? 3 : 2; }
         }
 
+        if (fix == FixMode.Report)
+        {
+            view.Note("[i] Repair skipped - the threats above were left untouched.");
+            view.Draw(true);
+            return 1;
+        }
+
+        view.Stage = "Repair";
         var repairer = new Repairer(settings);
         int ok = 0, failed = 0;
-        foreach (var f in findings)
-        {
-            var name = SafeName(f.Path);
-            status.Log($"[i] Fixing detection - {f.Detection}. Please wait.");
-            draw(true);
 
-            if (f.RegistryOnly)
+        foreach (var finding in findings)
+        {
+            var name = SafeName(finding.Path);
+            view.Current = finding.Path;
+            view.Note($"[i] Fixing detection - {finding.Detection}.");
+            view.Draw(true);
+
+            if (finding.RegistryOnly)
             {
-                var removal = Malward.Engine.Repair.RegistryRepair.Remove(f.RegistryLocation);
-                f.Action = removal.Ok ? "registry-removed" : "failed";
-                f.Detail = removal.Ok ? f.RegistryLocation : (removal.Error ?? "");
+                var removal = RegistryRepair.Remove(finding.RegistryLocation);
+                finding.Action = removal.Ok ? "registry-removed" : "failed";
+                finding.Detail = removal.Ok ? finding.RegistryLocation : (removal.Error ?? "");
                 if (removal.Ok) ok++; else failed++;
-                status.Log(removal.Ok
-                    ? $"[+] Detection {f.Detection} was fixed successfully (registry entry removed)."
-                    : $"[!] {f.Detection} on {f.RegistryLocation} was not fixed: {f.Detail}");
-                draw(true);
+                view.Note(removal.Ok
+                    ? $"[+] {finding.Detection} fixed (registry entry removed)."
+                    : $"[!] {finding.Detection} on {finding.RegistryLocation} was not fixed: {finding.Detail}");
+                view.Draw(true);
                 continue;
             }
 
             RepairOutcome outcome;
-            try { outcome = repairer.Repair(f.Result, userInitiated: true); }
+            try { outcome = repairer.Repair(finding.Result, userInitiated: true); }
             catch (Exception ex)
             {
                 failed++;
-                f.Action = "failed";
-                f.Detail = ex.Message;
-                status.Log($"[!] {f.Detection} on file {name} was not fixed: {ex.Message}");
-                draw(true);
+                finding.Action = "failed";
+                finding.Detail = ex.Message;
+                view.AddError($"REPAIR - {finding.Detection} on {name}: {ex.Message}");
+                view.Draw(true);
                 continue;
             }
 
-            f.Action = outcome.Action;
-            f.Detail = outcome.Detail ?? "";
+            finding.Action = outcome.Action;
+            finding.Detail = outcome.Detail ?? "";
 
-            if (f.RegistryLocation.Length > 0)
+            if (finding.RegistryLocation.Length > 0)
             {
-                var removal = Malward.Engine.Repair.RegistryRepair.Remove(f.RegistryLocation);
+                var removal = RegistryRepair.Remove(finding.RegistryLocation);
                 if (!removal.Ok)
-                    status.Log($"[!] registry entry {f.RegistryLocation} was not removed: {removal.Error}");
+                    view.AddError($"REPAIR - registry entry {finding.RegistryLocation} "
+                                  + $"was not removed: {removal.Error}");
             }
 
             if (outcome.Success && outcome.Action is not ("deferred" or "noop" or "system-skip"))
             {
                 ok++;
-                status.Log($"[+] Detection {f.Detection} on file {name} was fixed successfully "
-                           + $"({outcome.Action}).");
+                view.Note($"[+] {finding.Detection} on {name} fixed ({outcome.Action}).");
             }
             else
             {
                 failed++;
-                status.Log($"[!] {f.Detection} on file {name} was not fixed ({outcome.Action}"
-                           + (string.IsNullOrEmpty(outcome.Detail) ? "" : ", " + outcome.Detail) + ").");
+                view.AddError($"REPAIR - {finding.Detection} on {name} was not fixed "
+                              + $"({outcome.Action}"
+                              + (string.IsNullOrEmpty(outcome.Detail) ? "" : ", " + outcome.Detail) + ")");
             }
-            draw(true);
+            view.Draw(true);
         }
 
-        status.Log($"[i] Repaired {ok} of {findings.Count}, {failed} left.");
-        draw(true);
+        view.Current = "";
+        view.Note($"[i] Repaired {ok} of {findings.Count}, {failed} left.");
+        view.Draw(true);
         return failed == 0 ? 0 : 1;
     }
 
-    /// <summary>The live block fills the window, so the results would land under the fold.
-    /// On a real console the summary gets the screen to itself.</summary>
-    private static void FinalScreen(Status status, List<Finding> findings, ScanPlan plan)
+    private static FixMode AskRepair(ScanView view)
     {
-        if (Console.IsOutputRedirected) { Console.Out.WriteLine(); return; }
+        var screen = view.Surface;
+        if (!screen.Live || Console.IsInputRedirected) return FixMode.Report;
 
-        Con.Banner($"{plan.Name} scan — finished");
-        Con.Line($"Started : {status.Started:yyyy-MM-dd HH:mm:ss}", Tone.Dim);
-        Con.Line($"Profile : {status.Profile}", Tone.Dim);
-        Con.Line($"Layers  : {status.Layers}", Tone.Dim);
-        Con.Line($"Limits  : {status.Limits}", Tone.Dim);
-        Con.Line($"Scanned : {status.Scanned}", Tone.Dim);
-        Con.Line($"Errors  : {status.Errors}", status.Errors > 0 ? Tone.Warn : Tone.Dim);
-        Con.Line();
-    }
-
-    private static void Report(Status status, List<Finding> findings, Settings settings,
-                               ScanPlan plan, FixMode fix, bool autoReport)
-    {
-        var elapsed = DateTime.Now - status.Started;
-
-        if (findings.Count == 0)
+        var box = new List<(string, Tone)>
         {
-            Con.Line("No threats detected!", Tone.Info);
-        }
-        else
+            ("THREATS FOUND - CHOOSE AN ACTION", Tone.Title),
+            ("", Tone.Plain),
+            ("[Q] move to quarantine    [D] delete    [S] skip, report only", Tone.Info),
+        };
+
+        while (true)
         {
-            Con.Line($"DETECTIONS ({findings.Count})", Tone.Threat);
-            Con.Line();
-            var rows = new List<IReadOnlyList<string>>();
-            var tones = new List<Tone>();
-            foreach (var f in findings)
+            screen.Clear();
+            screen.Sidebar(SidebarInfo());
+            int y = screen.ContentTop;
+            screen.Put(screen.ContentLeft, y++, "REPAIR", Tone.Title);
+            screen.Rule(screen.ContentLeft, y++, screen.ContentWidth);
+            y++;
+            screen.Box(screen.ContentLeft, y, screen.ContentWidth, box, Tone.Threat);
+            screen.Flush(true);
+
+            var key = screen.WaitKey();
+            switch (key.Key)
             {
-                rows.Add(new[]
-                {
-                    f.Detection,
-                    f.Source,
-                    f.Action,
-                    f.Entry.Length == 0 ? f.Path : $"{f.Path} >> {f.Entry}",
-                });
-                tones.Add(f.Detection.StartsWith("Heur", StringComparison.OrdinalIgnoreCase)
-                    ? Tone.Heuristic : Tone.Threat);
+                case ConsoleKey.Q: return FixMode.Quarantine;
+                case ConsoleKey.D: return FixMode.Delete;
+                case ConsoleKey.S:
+                case ConsoleKey.Escape: return FixMode.Report;
             }
-            Con.Table(new[] { "DETECTION", "SOURCE", "ACTION", "FILE" }, rows, tones);
-        }
-
-        Con.Line();
-        Con.Line($"Scanned {status.Scanned} file(s) in {elapsed.TotalSeconds:F1} s, "
-                 + $"{findings.Count} threat(s), {status.Errors} error(s).", Tone.Dim);
-
-        bool save = autoReport;
-        if (!save && !Console.IsInputRedirected && !Console.IsOutputRedirected)
-        {
-            Con.Line();
-            Con.Write(Console.Out, "Save a detailed report to the Desktop? [y/N] ", Tone.Info);
-            var answer = (Console.ReadLine() ?? "").Trim().ToLowerInvariant();
-            save = answer.StartsWith('y') || answer.StartsWith('t');
-        }
-        if (!save) return;
-
-        try
-        {
-            var path = WriteReport(status, findings, settings, plan, fix);
-            Con.Line($"Report saved: {path}", Tone.Info);
-        }
-        catch (Exception ex)
-        {
-            Con.ErrorLine($"[!] Could not write the report: {ex.Message}");
         }
     }
 
-    private static string WriteReport(Status status, List<Finding> findings, Settings settings,
-                                      ScanPlan plan, FixMode fix)
+    private static void Finish(ScanView view, List<Finding> findings, ScanOptions options,
+                               ScanPlan plan, Screen screen, bool interactive)
+    {
+        string? saved = null;
+        if (options.AutoReport) saved = TrySaveReport(view, findings, options, plan);
+
+        if (!screen.Live)
+        {
+            PlainReport(view, findings, saved);
+            return;
+        }
+
+        bool inputAvailable;
+        try { inputAvailable = !Console.IsInputRedirected; }
+        catch { inputAvailable = false; }
+        if (!inputAvailable) return;
+
+        while (true)
+        {
+            view.Draw(true);
+            var key = screen.WaitKey();
+            if (key.Key == ConsoleKey.S)
+            {
+                saved = TrySaveReport(view, findings, options, plan);
+                view.Note(saved == null ? "[!] Report was not written." : "[+] Report saved: " + saved);
+                if (saved != null) view.AddError("REPORT - saved to " + saved);
+                continue;
+            }
+            return;
+        }
+    }
+
+    private static void PlainReport(ScanView view, List<Finding> findings, string? saved)
+    {
+        var output = view.Surface.Output;
+        output.WriteLine();
+        output.WriteLine($"Scanned {view.Scanned} file(s) in {view.Elapsed.TotalSeconds:F1} s, "
+                         + $"{findings.Count} threat(s), {view.Errors} error(s).");
+        foreach (var finding in findings)
+            output.WriteLine($"  {finding.Detection}  {finding.Path}"
+                             + (finding.Entry.Length == 0 ? "" : " >> " + finding.Entry)
+                             + $"  [{Method(finding.Source)}]  {finding.Action}");
+        if (saved != null) output.WriteLine("Report saved: " + saved);
+    }
+
+    private static string? TrySaveReport(ScanView view, List<Finding> findings,
+                                         ScanOptions options, ScanPlan plan)
+    {
+        try { return WriteReport(view, findings, options, plan); }
+        catch { return null; }
+    }
+
+    private static string WriteReport(ScanView view, List<Finding> findings,
+                                      ScanOptions options, ScanPlan plan)
     {
         var dir = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         if (string.IsNullOrEmpty(dir)) dir = AppContext.BaseDirectory;
-        var file = Path.Combine(dir, $"malward-scan-{status.Started:yyyyMMdd-HHmmss}.txt");
+        var file = System.IO.Path.Combine(dir,
+            $"malward-scan-{view.Started:yyyyMMdd-HHmmss}.txt");
 
         var text = new System.Text.StringBuilder();
-        text.AppendLine("Malward Command Shell Manager - scan report");
-        text.AppendLine($"Started : {status.Started:yyyy-MM-dd HH:mm:ss}");
+        text.AppendLine("Malward Command Tool Utility - scan report");
+        text.AppendLine($"Started : {view.Started:yyyy-MM-dd HH:mm:ss}");
         text.AppendLine($"Finished: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-        text.AppendLine($"Profile : {plan.Name}");
-        text.AppendLine($"Repair  : {fix.ToString().ToLowerInvariant()}");
-        text.AppendLine($"Threads : {settings.ScanMaxParallelism}");
+        text.AppendLine($"Profile : {plan.Name}{(view.Stopped ? " (stopped by user)" : "")}");
+        text.AppendLine($"Repair  : {options.FixLabel}");
+        text.AppendLine($"Threads : {options.EffectiveThreads}");
         text.AppendLine();
         text.AppendLine("Detection layers");
-        text.AppendLine($"  memory scan      : {OnOff(plan.Memory)}");
-        text.AppendLine($"  archives         : {OnOff(settings.ScanArchives)}");
-        text.AppendLine($"  heuristics       : {OnOff(settings.HeuristicEnabled)}");
+        text.AppendLine($"  cloud scan       : {ScanOptions.OnOff(options.CloudScan)}");
+        text.AppendLine($"  cloud verify     : {ScanOptions.OnOff(options.CloudVerify)}");
+        text.AppendLine($"  cloud cache      : {ScanOptions.OnOff(options.CloudCache)}");
+        text.AppendLine($"  skip MS-signed   : {ScanOptions.OnOff(options.SkipSigned)}");
         text.AppendLine("  file whitelist   : on");
-        text.AppendLine($"  cloud scan       : {OnOff(settings.CloudScanEnabled)}");
-        text.AppendLine($"  cloud verify     : {OnOff(settings.CloudVerifyDetections)}");
-        text.AppendLine($"  cloud cache      : {OnOff(settings.ScanOptimization)}");
-        text.AppendLine($"  skip MS-signed   : {OnOff(settings.SkipMsSigned)}");
-        text.AppendLine($"  limits           : {status.Limits}");
-        text.AppendLine();
-        text.AppendLine("Databases");
-        foreach (var e in DatabaseInfo.Listed)
+        text.AppendLine($"  memory scan      : {ScanOptions.OnOff(options.MemoryScan)}");
+        text.AppendLine($"  archives         : {ScanOptions.OnOff(options.Archives)}");
+        text.AppendLine($"  heuristics       : {ScanOptions.OnOff(options.Heuristics)}");
+        text.AppendLine($"  largest file     : {ScanOptions.Limit(options.MaxFileMb)}");
+        text.AppendLine($"  largest archive  : {ScanOptions.Limit(options.ArchiveMaxMb)}");
+        text.AppendLine($"  archive nesting  : {options.ArchiveDepth}");
+        text.AppendLine($"  extensions       : {options.ExtensionLabel}");
+        if (options.CloudWeakened)
         {
-            if (!DatabaseInfo.Installed(e)) continue;
-            var build = DatabaseInfo.Version(e.VersionKey);
-            text.AppendLine($"  {e.Name,-24}{(build.Length == 0 ? "unknown" : build)}");
+            text.AppendLine();
+            text.AppendLine("WARNING: the cloud cross-check was off for this scan, so detections");
+            text.AppendLine("were not confirmed and some of them may be false positives.");
+        }
+        if (options.Heuristics)
+        {
+            text.AppendLine();
+            text.AppendLine("WARNING: heuristic analysis was on, which judges files by shape and");
+            text.AppendLine("produces false positives more often than signature matching.");
         }
         text.AppendLine();
-        text.AppendLine($"Scanned    : {status.Scanned}");
+        text.AppendLine("Databases");
+        foreach (var entry in DatabaseInfo.Listed)
+        {
+            if (!DatabaseInfo.Installed(entry)) continue;
+            var build = DatabaseInfo.Version(entry.VersionKey);
+            text.AppendLine($"  {entry.Name,-24}{(build.Length == 0 ? "unknown" : build)}");
+        }
+        text.AppendLine();
+        text.AppendLine($"Scanned    : {view.Scanned}");
+        text.AppendLine($"Data       : {ScanView.Data(view.Bytes)}");
+        text.AppendLine($"Duration   : {view.Elapsed:hh\\:mm\\:ss}");
         text.AppendLine($"Infections : {findings.Count}");
-        text.AppendLine($"Errors     : {status.Errors}");
+        text.AppendLine($"Errors     : {view.Errors}");
+        foreach (var alert in view.Alerts()) text.AppendLine("WARNING: " + alert.TrimStart('!', ' '));
         text.AppendLine();
 
         text.AppendLine("Detections");
         if (findings.Count == 0) text.AppendLine("  none");
-        foreach (var f in findings)
+        foreach (var finding in findings)
         {
-            text.AppendLine($"  {f.Detection}");
-            text.AppendLine($"    file   : {f.Path}");
-            if (f.Entry.Length > 0) text.AppendLine($"    entry  : {f.Entry}");
-            text.AppendLine($"    source : {f.Source}");
-            text.AppendLine($"    action : {f.Action}{(f.Detail.Length == 0 ? "" : " - " + f.Detail)}");
+            text.AppendLine($"  {finding.Detection}");
+            text.AppendLine($"    file   : {finding.Path}");
+            if (finding.Entry.Length > 0) text.AppendLine($"    entry  : {finding.Entry}");
+            text.AppendLine($"    method : {Method(finding.Source)} ({finding.Source})");
+            text.AppendLine($"    action : {finding.Action}"
+                            + (finding.Detail.Length == 0 ? "" : " - " + finding.Detail));
         }
         text.AppendLine();
 
+        text.AppendLine("Errors");
+        var errorLines = view.ErrorLines;
+        if (errorLines.Count == 0) text.AppendLine("  none");
+        foreach (var line in errorLines) text.AppendLine("  " + line);
+        text.AppendLine();
+
         text.AppendLine("Log");
-        foreach (var line in status.FullLog) text.AppendLine("  " + line);
+        foreach (var line in view.Journal) text.AppendLine("  " + line);
 
         File.WriteAllText(file, text.ToString(), new System.Text.UTF8Encoding(false));
         return file;
@@ -886,13 +1110,9 @@ public static class ScanShell
 
     private static string SafeName(string path)
     {
-        try { return Path.GetFileName(path); }
+        try { return System.IO.Path.GetFileName(path); }
         catch { return path; }
     }
-
-    private static string Describe(DetectionResult r)
-        => $"[!] {r.Detection}  {r.Path}"
-           + (string.IsNullOrEmpty(r.ArchiveEntry) ? "" : $"  >> {r.ArchiveEntry}");
 
     private static readonly string OwnDirectory = OwnDirectoryPath();
 
@@ -900,8 +1120,9 @@ public static class ScanShell
     {
         try
         {
-            var dir = Path.GetFullPath(AppContext.BaseDirectory);
-            return dir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            var dir = System.IO.Path.GetFullPath(AppContext.BaseDirectory);
+            return dir.TrimEnd(System.IO.Path.DirectorySeparatorChar)
+                   + System.IO.Path.DirectorySeparatorChar;
         }
         catch { return ""; }
     }
@@ -909,10 +1130,16 @@ public static class ScanShell
     private static bool IsUnderOwnDirectory(string path)
     {
         if (OwnDirectory.Length == 0) return false;
+        if (path.StartsWith(OwnDirectory, StringComparison.OrdinalIgnoreCase)) return true;
+        if (path.Length == OwnDirectory.Length - 1
+            && OwnDirectory.StartsWith(path, StringComparison.OrdinalIgnoreCase)) return true;
+        if (System.IO.Path.IsPathFullyQualified(path)) return false;
+
         try
         {
-            var full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar)
-                       + Path.DirectorySeparatorChar;
+            var full = System.IO.Path.GetFullPath(path)
+                       .TrimEnd(System.IO.Path.DirectorySeparatorChar)
+                       + System.IO.Path.DirectorySeparatorChar;
             return full.StartsWith(OwnDirectory, StringComparison.OrdinalIgnoreCase);
         }
         catch { return false; }
@@ -923,19 +1150,26 @@ public static class ScanShell
         if (excluded.Count == 0) return false;
 
         string full;
-        try { full = Path.GetFullPath(file); }
+        try { full = System.IO.Path.GetFullPath(file); }
         catch { full = file; }
 
-        foreach (var e in excluded)
+        foreach (var entry in excluded)
         {
-            if (full.Equals(e, StringComparison.OrdinalIgnoreCase)) return true;
-            var prefix = e.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (full.Equals(entry, StringComparison.OrdinalIgnoreCase)) return true;
+            var prefix = entry.TrimEnd(System.IO.Path.DirectorySeparatorChar)
+                         + System.IO.Path.DirectorySeparatorChar;
             if (full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;
         }
         return false;
     }
 
-    private static string OnOff(bool v) => v ? "on" : "off";
+    private static readonly EnumerationOptions WalkOptions = new()
+    {
+        IgnoreInaccessible = true,
+        RecurseSubdirectories = false,
+        ReturnSpecialDirectories = false,
+        AttributesToSkip = 0,
+    };
 
     private static IEnumerable<string> Walk(string root)
     {
@@ -947,19 +1181,39 @@ public static class ScanShell
         while (stack.Count > 0)
         {
             var dir = stack.Pop();
-            string[] files;
-            try { files = Directory.GetFiles(dir); }
-            catch { continue; }
-            foreach (var f in files) yield return f;
 
-            string[] subs;
-            try { subs = Directory.GetDirectories(dir); }
-            catch { continue; }
-            foreach (var s in subs)
+            IEnumerator<FileSystemInfo>? entries;
+            try
             {
-                try { if ((File.GetAttributes(s) & FileAttributes.ReparsePoint) != 0) continue; }
-                catch { continue; }
-                stack.Push(s);
+                entries = new DirectoryInfo(dir)
+                    .EnumerateFileSystemInfos("*", WalkOptions).GetEnumerator();
+            }
+            catch { continue; }
+
+            using (entries)
+            {
+                while (true)
+                {
+                    FileSystemInfo entry;
+                    try
+                    {
+                        if (!entries.MoveNext()) break;
+                        entry = entries.Current;
+                    }
+                    catch { break; }
+
+                    FileAttributes attributes;
+                    try { attributes = entry.Attributes; }
+                    catch { continue; }
+
+                    if ((attributes & FileAttributes.ReparsePoint) != 0) continue;
+                    if ((attributes & FileAttributes.Directory) != 0)
+                    {
+                        stack.Push(entry.FullName);
+                        continue;
+                    }
+                    yield return entry.FullName;
+                }
             }
         }
     }

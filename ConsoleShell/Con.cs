@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
 namespace Malward.ConsoleShell;
 
@@ -47,8 +47,48 @@ public static class Con
         _              => ConsoleColor.Gray,
     };
 
+    // Ekrany pelnoekranowe sanityzuje Screen.Put, ale pomoc, lista wykluczen i
+    // komunikaty startowe ida prosto tutaj. Bez tego na konsoli sprzed Windows 10
+    // myslnik i wielokropek wychodza krzakami tak samo jak ramki.
+    public static string Plain(string text)
+    {
+        if (!ConsoleWindow.LegacyConsole || text.Length == 0) return text;
+        Span<char> buf = text.Length <= 512 ? stackalloc char[text.Length] : new char[text.Length];
+        bool zmiana = false;
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+            char p = c <= '\u007E' ? c : Transliterate(c);
+            buf[i] = p;
+            if (p != c) zmiana = true;
+        }
+        return zmiana ? new string(buf) : text;
+    }
+
+    private static char Transliterate(char value) => value switch
+    {
+        '\u2014' or '\u2013' or '\u2212' => '-',
+        '\u2026' => '~',
+        '\u2018' or '\u2019' or '\u201A' => '\'',
+        '\u201C' or '\u201D' or '\u201E' => '"',
+        '\u00A0' => ' ',
+        '\u2022' or '\u00B7' => '*',
+        '\u00D7' => 'x',
+        '\u0105' => 'a', '\u0104' => 'A',
+        '\u0107' => 'c', '\u0106' => 'C',
+        '\u0119' => 'e', '\u0118' => 'E',
+        '\u0142' => 'l', '\u0141' => 'L',
+        '\u0144' => 'n', '\u0143' => 'N',
+        '\u00F3' => 'o', '\u00D3' => 'O',
+        '\u015B' => 's', '\u015A' => 'S',
+        '\u017A' or '\u017C' => 'z',
+        '\u0179' or '\u017B' => 'Z',
+        _ => '?',
+    };
+
     public static void Write(TextWriter output, string text, Tone tone)
     {
+        text = Plain(text);
         if (!Colors || tone == Tone.Plain) { output.Write(text); return; }
 
         var previous = Console.ForegroundColor;
@@ -78,8 +118,8 @@ public static class Con
         try { Console.Clear(); } catch { }
     }
 
-    public const string ProductLine = "Malward(R) Cloud AntiVirus Scanner";
-    public const string ToolLine = "Command Shell Manager";
+    public const string ProductLine = "Malward(R) Cloud Scanner Portable";
+    public const string ToolLine = "Command Tool Utility";
 
     public static void Banner(string subtitle)
     {
@@ -96,8 +136,6 @@ public static class Con
     private const char LowLeft = '\u2514', LowRight = '\u2518', LowTee = '\u2534';
     private const char Horizontal = '\u2500', Vertical = '\u2502';
 
-    /// <summary>A framed table. The last column takes whatever width is left and is cut to fit,
-    /// so a long path never wraps the frame.</summary>
     public static void Table(IReadOnlyList<string> headers,
                              IReadOnlyList<IReadOnlyList<string>> rows,
                              IReadOnlyList<Tone> rowTones)
@@ -112,8 +150,6 @@ public static class Con
         Rule(widths, LowLeft, LowTee, LowRight);
     }
 
-    /// <summary>The same frame as <see cref="Table"/>, but as finished lines for a block that is
-    /// redrawn in place. A row carries one tone, since the line is written in one go.</summary>
     public static List<(string Text, Tone Tone)> TableLines(IReadOnlyList<string> headers,
                                                             IReadOnlyList<IReadOnlyList<string>> rows,
                                                             IReadOnlyList<Tone> rowTones)
@@ -205,9 +241,6 @@ public static class Con
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint GetConsoleProcessList(uint[] processList, uint count);
 
-    /// <summary>True when this process is the only one attached to the console window, which means
-    /// the window was opened for it and would vanish with it - started from Explorer rather than
-    /// typed at an existing prompt.</summary>
     public static bool OwnsConsoleWindow()
     {
         try

@@ -1,6 +1,5 @@
 namespace Malward.ConsoleShell;
 
-/// <summary>Switch parser shared by every shell: accepts both /x and --long forms.</summary>
 public sealed class CommandLine
 {
     private readonly List<string> _raw;
@@ -34,7 +33,6 @@ public sealed class CommandLine
 
     public bool Has(params string[] names) => IndexOf(names) >= 0;
 
-    /// <summary>A flag that defaults to on: present alone turns it on, "name off|0|no" turns it off.</summary>
     public bool Flag(bool fallback, params string[] names)
     {
         int i = IndexOf(names);
@@ -69,7 +67,6 @@ public sealed class CommandLine
         return int.TryParse(v, out var n) ? n : null;
     }
 
-    /// <summary>Everything that was not consumed as a switch or its value - used for paths.</summary>
     public List<string> Positional()
     {
         var o = new List<string>();

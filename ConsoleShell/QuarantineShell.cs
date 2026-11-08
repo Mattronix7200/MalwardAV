@@ -2,7 +2,6 @@ using Malward.Engine.Quarantine;
 
 namespace Malward.ConsoleShell;
 
-/// <summary>The /quarmng shell: list, inspect, search, extract and revert quarantined files.</summary>
 public static class QuarantineShell
 {
     public static int Run(CommandLine cl)

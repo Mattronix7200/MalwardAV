@@ -73,6 +73,9 @@ public sealed class ShieldConfig
     [JsonPropertyName("behavior_user_decides")]
     public bool BehaviorUserDecides { get; set; } = false;
 
+    [JsonPropertyName("behavior_trust_signed")]
+    public bool BehaviorTrustSigned { get; set; } = true;
+
     [JsonPropertyName("behavior_action")]
     public string BehaviorActionName { get; set; } = "kill_rollback";
 

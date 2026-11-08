@@ -62,6 +62,8 @@ public static class BehaviorAnalyzer
         ".bat", ".cmd", ".lnk", ".jar", ".msi",
     };
 
+    [ThreadStatic] private static ProcessTracker? _current;
+
     public static IReadOnlyList<BehaviorAlert> Analyze(ProcessTracker tracker, int pid, ShieldConfig cfg,
         bool viaTrustedTool = false)
     {
@@ -70,6 +72,9 @@ public static class BehaviorAnalyzer
         if (proc == null) return alerts;
 
         var changes = tracker.GetChanges(pid);
+        _current = tracker;
+        try
+        {
 
         CheckAutostartModification(proc, changes, alerts);
         CheckServiceCreation(proc, changes, alerts);
@@ -93,8 +98,35 @@ public static class BehaviorAnalyzer
         CheckReplication(proc, changes, cfg, alerts);
 
         ComputeBehaviorScore(proc, cfg, alerts);
+        }
+        finally { _current = null; }
 
         return alerts;
+    }
+
+    private static bool IsReputable(ProcessInfo proc)
+    {
+        var tracker = _current;
+        if (tracker == null) return false;
+        var rep = tracker.GetReputation(proc.Pid, proc.ImagePath);
+        if (rep is ProcRep.SystemTrusted) return true;
+        if (rep is ProcRep.Whitelisted) return true;
+        return BehaviorTrust.TrustValidSignature && BehaviorTrust.HasTrustedPublisher(proc.ImagePath);
+    }
+
+    private static bool IsTrustedOrReputable(ProcessInfo proc)
+        => IsTrustedProcess(proc) || (IsReputable(proc) && CommandLineTargetsTrusted(proc));
+
+    private static bool CommandLineTargetsTrusted(ProcessInfo proc)
+    {
+        if (string.IsNullOrEmpty(proc.CommandLine)) return true;
+        string host;
+        try { host = Path.GetFileName(proc.ImagePath ?? ""); } catch { return true; }
+        if (host.Length == 0 || !LolBin.IsInterpreter(host)) return true;
+
+        foreach (var target in LolBin.ExtractTargets(host, proc.CommandLine))
+            if (!IsTrustedPath(target) && !BehaviorTrust.HasTrustedPublisher(target)) return false;
+        return true;
     }
 
     private static void CheckAutostartModification(
@@ -115,7 +147,7 @@ public static class BehaviorAnalyzer
                           .Select(c => c.Location).Distinct().ToList();
         if (svcs.Count == 0) return;
 
-        if (!IsTrustedProcess(proc))
+        if (!IsTrustedOrReputable(proc))
             alerts.Add(new BehaviorAlert(proc.Pid, proc.Name, BehaviorSeverity.High, "Persistence",
                 Loc.F("Utworzono usługę systemową: {0}", string.Join(", ", svcs.Take(3)))));
     }
@@ -127,7 +159,7 @@ public static class BehaviorAnalyzer
                            .Select(c => c.Location).Distinct().ToList();
         if (tasks.Count == 0) return;
 
-        if (!IsTrustedProcess(proc))
+        if (!IsTrustedOrReputable(proc))
             alerts.Add(new BehaviorAlert(proc.Pid, proc.Name, BehaviorSeverity.High, "Persistence",
                 $"Utworzono zadanie harmonogramu: {string.Join(", ", tasks.Take(3))}"));
     }
@@ -169,7 +201,7 @@ public static class BehaviorAnalyzer
     private static void CheckSuspiciousFileWrite(
         ProcessInfo proc, IReadOnlyList<ProcessChange> changes, List<BehaviorAlert> alerts)
     {
-        if (IsTrustedProcess(proc)) return;
+        if (IsTrustedOrReputable(proc)) return;
         var writes = changes
             .Where(c => c.Kind is ChangeKind.FileCreate or ChangeKind.FileModify)
             .Select(c => c.Location)
@@ -186,7 +218,7 @@ public static class BehaviorAnalyzer
         ProcessInfo proc, IReadOnlyList<ProcessChange> changes, List<BehaviorAlert> alerts,
         bool viaTrustedTool = false)
     {
-        if (!viaTrustedTool && IsTrustedProcess(proc)) return;
+        if (!viaTrustedTool && IsTrustedOrReputable(proc)) return;
 
         var sec = changes
             .Where(c => c.Kind is ChangeKind.RegSet or ChangeKind.RegCreate
@@ -203,7 +235,7 @@ public static class BehaviorAnalyzer
         ProcessInfo proc, IReadOnlyList<ProcessChange> changes, List<BehaviorAlert> alerts,
         bool viaTrustedTool = false)
     {
-        if (!viaTrustedTool && IsTrustedProcess(proc)) return;
+        if (!viaTrustedTool && IsTrustedOrReputable(proc)) return;
 
         var hits = changes
             .Where(c => c.Kind is ChangeKind.RegSet or ChangeKind.RegCreate
@@ -271,7 +303,7 @@ public static class BehaviorAnalyzer
             return;
         }
 
-        if (children.Count >= 5 && !IsTrustedProcess(proc))
+        if (children.Count >= 5 && !IsTrustedOrReputable(proc))
             alerts.Add(new BehaviorAlert(proc.Pid, proc.Name, BehaviorSeverity.Medium, "ExcessiveChildSpawning",
                 Loc.F("Proces z niezaufanej lokalizacji tworzy {0} procesów potomnych", children.Count)));
     }
@@ -726,7 +758,7 @@ un") || cmd.Contains("userinit")
     {
         var sc = cfg.BehaviorScoring;
         if (!sc.Enabled) return;
-        if (IsTrustedProcess(proc)) return;
+        if (IsTrustedOrReputable(proc)) return;
         if (string.IsNullOrEmpty(proc.ImagePath)) return;
 
         var createdPe = changes
@@ -784,7 +816,7 @@ un") || cmd.Contains("userinit")
     {
         var sc = cfg.BehaviorScoring;
         if (!sc.Enabled) return;
-        if (IsTrustedProcess(proc)) return;
+        if (IsTrustedOrReputable(proc)) return;
         if (alerts.Count == 0) return;
 
         int score = alerts.Sum(a => a.Severity switch

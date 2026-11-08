@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Security.Cryptography;
 
 namespace Malward.ResidentShield;
@@ -99,6 +99,11 @@ public sealed class ScanEngine : IDisposable
             if (SystemGuard.IsProtectedPath(filePath)) return true;
             if (_vps.Lookup(h.Md5, h.Sha256) != null) return false;
             if (_whitelist.IsWhitelisted(h.Md5, h.Sha256)) return true;
+            // Podpis sprawdzany na koncu, po BYOVD i po bazie VPS, zeby zaden z tych
+            // werdyktow nie dal sie nim przebic. Wlaczany tylko na profilu niskim i
+            // domyslnym - patrz BehaviorTrust.Apply.
+            if (BehaviorTrust.TrustValidSignature && BehaviorTrust.HasTrustedPublisher(filePath))
+                return true;
             return false;
         }
         catch { return false; }

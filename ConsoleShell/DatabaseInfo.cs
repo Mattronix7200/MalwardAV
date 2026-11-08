@@ -16,7 +16,6 @@ public static class DatabaseInfo
         new("Vulnerable drivers",     "vps-ex04.vdeb",     "byod"),
     };
 
-    /// <summary>Without the signature database a scan reports nothing at all.</summary>
     public static readonly Entry[] Required = { Listed[0] };
 
     private static JsonObject? _versions;

@@ -3,7 +3,6 @@ using Malward.Engine.Util;
 
 namespace Malward.ConsoleShell;
 
-/// <summary>The /exclusions shell. Keeps its own list so the GUI scanner configuration is untouched.</summary>
 public static class ExclusionShell
 {
     private static string StorePath =>

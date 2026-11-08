@@ -75,6 +75,8 @@ public sealed class ShieldService : IAsyncDisposable
         var ct = _cts.Token;
 
         AutoExcludeSelfDirectory();
+        BehaviorTrust.Apply(_hips.Tier, _config.BehaviorTrustSigned);
+        Log.Info("Behavior", "Trust: " + BehaviorTrust.Describe(_hips.Tier));
         _activity.Start();
 
         for (int i = 0; i < _workers.Length; i++)
@@ -185,6 +187,8 @@ public sealed class ShieldService : IAsyncDisposable
             }
 
             _config.CopyFrom(fresh);
+            BehaviorTrust.Apply(_hips.Tier, _config.BehaviorTrustSigned);
+            Log.Info("Behavior", "Trust: " + BehaviorTrust.Describe(_hips.Tier));
             _fileWatcher?.ApplySettings();
             SyncRemovableWatcher();
             SyncHipsWatchers();
@@ -540,13 +544,26 @@ public sealed class ShieldService : IAsyncDisposable
             return;
         }
 
+        // Tani podglad PRZED zamrozeniem. Zawieszenie i wznowienie procesu, ktory i tak
+        // okaze sie zaufany, potrafi rozwalic aktualizator w trakcie pobierania - a wlasnie
+        // tak wygladalo "Malward zamyka mi NVIDIA Update". Kosztowne sprawdzenie (hash,
+        // podpis) zostaje tam gdzie bylo: za zamrozeniem, dla procesow nieznanych.
+        var repFast = _tracker.GetReputation(proc.Pid, proc.ImagePath);
+        if (repFast is ProcRep.Whitelisted or ProcRep.SystemTrusted
+            && !IsHardRansomSignal(alert.Category))
+        {
+            Log.Info("Behavior", $"Alert {alert.Category} for PID {proc.Pid} ({proc.Name}) " +
+                                 $"— trusted program ({repFast}); not suspended.");
+            return;
+        }
+
         try { NativeProcess.Suspend(proc.Pid); } catch { }
 
         Task.Run(async () =>
         {
             try
             {
-                var rep = _tracker.GetReputation(proc.Pid, proc.ImagePath);
+                var rep = repFast;
                 if (rep == ProcRep.Unknown)
                 {
                     try { if (_scanner.IsBehaviorTrusted(proc.ImagePath)) rep = ProcRep.Whitelisted; }
