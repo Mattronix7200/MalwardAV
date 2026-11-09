@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Security.AccessControl;
 using System.ServiceProcess;
 using System.Text;
@@ -94,7 +94,15 @@ internal static class Program
             KillLeftovers();
 
             Step("Odblokowuję katalog programu…", "Unlocking the program folder…");
-            UnlockInstallFolder(opts.Install);
+            if (!UnlockInstallFolder(opts.Install))
+            {
+                // Kopiowanie do zablokowanego katalogu konczy sie sciana identycznych
+                // "Access to the path is denied" i podmiana polowy plikow, gdyby czesc
+                // jednak przeszla. Lepiej nie zaczynac.
+                Log("=== Aborted: the install folder is not writable, nothing was changed ===");
+                StartServices(stopped);
+                return 3;
+            }
 
             Step("Kopiuję pliki…", "Copying files…");
             var (copied, failed) = CopyTree(opts.Staging, opts.Install);
@@ -322,15 +330,52 @@ internal static class Program
         return (copied, failed);
     }
 
-    private static void UnlockInstallFolder(string dir)
+    /// <summary>Takes the guard off the install folder. Returns false when the folder is still read-only.</summary>
+    /// <remarks>
+    /// The previous version ran three icacls calls, ignored every exit code and then logged
+    /// "Install directory lock removed" unconditionally. When the guard stayed on, the log
+    /// claimed success and the copy that followed failed on all 28 files with a bare
+    /// "Access to the path is denied", with nothing tying the two together.
+    ///
+    /// The deciding test is not what icacls returns but whether the folder can actually be
+    /// written to, so that is what gets checked - and the guard marker is only dropped once
+    /// the write succeeds, otherwise the service and the updater disagree about reality.
+    /// </remarks>
+    private static bool UnlockInstallFolder(string dir)
     {
         try
         {
-            if (!Directory.Exists(dir)) return;
+            if (!Directory.Exists(dir)) return true;
+            if (CanWriteInto(dir)) return true;
 
-            Icacls($"\"{dir}\" /setowner *S-1-5-32-544 /C /Q");
-            Icacls($"\"{dir}\" /reset /T /C /Q");
-            Icacls($"\"{dir}\" /inheritance:e");
+            // Wlasciciel ma WRITE_DAC niezaleznie od listy uprawnien, wiec przejecie wlasnosci
+            // musi byc pierwsze - bez tego /reset nie ma prawa zmienic ACL.
+            var kroki = new[]
+            {
+                $"\"{dir}\" /setowner *S-1-5-32-544 /T /C /Q",
+                $"\"{dir}\" /remove:d *S-1-1-0 /T /C /Q",
+                $"\"{dir}\" /grant *S-1-5-32-544:(OI)(CI)(F) /T /C /Q",
+                $"\"{dir}\" /grant *S-1-5-18:(OI)(CI)(F) /T /C /Q",
+                $"\"{dir}\" /reset /T /C /Q",
+                $"\"{dir}\" /inheritance:e",
+            };
+            foreach (var krok in kroki)
+            {
+                var (rc, output) = Icacls(krok);
+                if (rc != 0)
+                    Log($"  icacls rc={rc}: {Trim(output)}");
+            }
+
+            if (!CanWriteInto(dir))
+            {
+                Log("Failed to remove the install directory lock — the folder is still read-only.");
+                Log("  Nothing was copied. Stop the Malward service, run the update again, or");
+                Log("  clear the lock by hand:");
+                Log($"  icacls \"{dir}\" /setowner *S-1-5-32-544 /T /C");
+                Log($"  icacls \"{dir}\" /remove:d *S-1-1-0 /T /C");
+                Log($"  icacls \"{dir}\" /reset /T /C");
+                return false;
+            }
 
             var marker = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
@@ -338,11 +383,39 @@ internal static class Program
             try { if (File.Exists(marker)) File.Delete(marker); } catch { }
 
             Log("Install directory lock removed (the service will re-apply it at startup).");
+            return true;
         }
-        catch (Exception ex) { Log($"Failed to remove the directory lock: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            Log($"Failed to remove the directory lock: {ex.Message}");
+            return false;
+        }
     }
 
-    private static void Icacls(string args)
+    /// <summary>Writes and deletes a probe file. The only check that answers the question we have.</summary>
+    private static bool CanWriteInto(string dir)
+    {
+        var probe = Path.Combine(dir, ".malward-update-probe");
+        try
+        {
+            File.WriteAllBytes(probe, new byte[] { 0 });
+            File.Delete(probe);
+            return true;
+        }
+        catch
+        {
+            try { if (File.Exists(probe)) File.Delete(probe); } catch { }
+            return false;
+        }
+    }
+
+    private static string Trim(string text)
+    {
+        text = (text ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+        return text.Length <= 160 ? text : text[..160] + "...";
+    }
+
+    private static (int rc, string output) Icacls(string args)
     {
         try
         {
@@ -353,9 +426,12 @@ internal static class Program
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             });
-            p?.WaitForExit(30000);
+            if (p == null) return (-1, "failed to start icacls.exe");
+            string output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+            if (!p.WaitForExit(30000)) { try { p.Kill(); } catch { } return (-1, "icacls: timeout"); }
+            return (p.ExitCode, output);
         }
-        catch { }
+        catch (Exception ex) { return (-1, ex.Message); }
     }
 
     private static string? WriteVersionFile(string install, string staging)
