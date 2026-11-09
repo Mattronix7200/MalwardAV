@@ -152,7 +152,7 @@ The software is provided "AS IS", without any warranty of any kind.
 
 ## Download
 
-Version: 1.0.0. Released: 04.11.2026.
+Version: 1.0.1. Released: 08.11.2026.
 
-https://github.com/Mattronix7200/MalwardAV/releases/tag/1.0.0
+https://github.com/Mattronix7200/MalwardAV/releases/tag/1.0.1
 
