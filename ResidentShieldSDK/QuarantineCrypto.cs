@@ -110,6 +110,53 @@ public static class QuarantineCrypto
         catch { return false; }
     }
 
+    public static bool TryHashPlain(string containerPath, out string sha256, out string md5, out long size)
+    {
+        sha256 = ""; md5 = ""; size = 0;
+        try
+        {
+            using var src = File.OpenRead(containerPath);
+            var magic = new byte[Magic.Length];
+            if (src.Read(magic, 0, magic.Length) != magic.Length || !magic.AsSpan().SequenceEqual(Magic))
+                return false;
+
+            var salt = new byte[SaltLen];
+            var iv = new byte[IvLen];
+            var mac = new byte[MacLen];
+            src.ReadExactly(salt);
+            src.ReadExactly(iv);
+            src.ReadExactly(mac);
+
+            var (aesKey, macKey) = Derive(salt);
+            using (var hmac = new HMACSHA256(macKey))
+            {
+                long cipherStart = src.Position;
+                byte[] actual = hmac.ComputeHash(Prefixed(salt, iv, src));
+                if (!CryptographicOperations.FixedTimeEquals(actual, mac)) return false;
+                src.Position = cipherStart;
+            }
+
+            using var aes = Aes.Create();
+            aes.Key = aesKey; aes.IV = iv; aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7;
+            using var dec = aes.CreateDecryptor();
+            using var cs = new CryptoStream(src, dec, CryptoStreamMode.Read, leaveOpen: true);
+            using var hSha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            using var hMd5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
+            var buf = new byte[81920];
+            int n;
+            while ((n = cs.Read(buf, 0, buf.Length)) > 0)
+            {
+                hSha.AppendData(buf, 0, n);
+                hMd5.AppendData(buf, 0, n);
+                size += n;
+            }
+            sha256 = Convert.ToHexString(hSha.GetHashAndReset()).ToLowerInvariant();
+            md5 = Convert.ToHexString(hMd5.GetHashAndReset()).ToLowerInvariant();
+            return true;
+        }
+        catch { sha256 = ""; md5 = ""; size = 0; return false; }
+    }
+
     private static Stream Prefixed(byte[] salt, byte[] iv, Stream rest)
     {
         var ms = new MemoryStream();

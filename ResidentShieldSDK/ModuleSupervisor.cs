@@ -20,6 +20,9 @@ public sealed class ModuleSupervisor : BackgroundService
 
     private volatile bool _stopping;
 
+    private bool _residentBehaviorOnly;
+    private bool _residentStartBehaviorOnly;
+
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     public ModuleSupervisor(ShieldConfig config)
@@ -110,7 +113,17 @@ public sealed class ModuleSupervisor : BackgroundService
                 return;
             }
 
-            await ApplyAsync(_resident, want.Resident, ct);
+            bool behaviorOnly = !want.Resident && want.Behavior;
+            if (_resident.Running != null && _residentBehaviorOnly != behaviorOnly)
+            {
+                await StopSlotAsync(_resident);
+                Log.Info("Modules", behaviorOnly
+                    ? "Resident protection: switching to behaviour monitoring only."
+                    : "Resident protection: switching back to full protection.");
+            }
+            _residentStartBehaviorOnly = behaviorOnly;
+            await ApplyAsync(_resident, want.Resident || want.Behavior, ct);
+            if (_resident.Running != null) _residentBehaviorOnly = behaviorOnly;
             await ApplyAsync(_network, want.Network, ct);
             await ApplyAsync(_backup, want.Backup, ct);
 
@@ -151,7 +164,8 @@ public sealed class ModuleSupervisor : BackgroundService
         try
         {
             string content =
-                "{\"resident\":" + (_resident.Running != null ? "true" : "false") +
+                "{\"resident\":" + (_resident.Running != null && !_residentBehaviorOnly ? "true" : "false") +
+                ",\"behavior\":" + (_resident.Running != null ? "true" : "false") +
                 ",\"network\":" + (_network.Running != null ? "true" : "false") +
                 ",\"backup\":" + (_backup.Running != null ? "true" : "false") +
                 ",\"ts\":" + DateTimeOffset.UtcNow.ToUnixTimeSeconds() + "}";
@@ -376,6 +390,9 @@ public sealed class ModuleSupervisor : BackgroundService
         ShieldConfig cfg;
         try { cfg = ShieldConfig.Load(null); }
         catch { cfg = _startupConfig; }
+        cfg.BehaviorOnly = _residentStartBehaviorOnly;
+        if (cfg.BehaviorOnly)
+            Log.Info("Modules", "Resident file scanning is off — only behaviour monitoring and system component protection run.");
         return new ShieldWorker(cfg);
     }
 

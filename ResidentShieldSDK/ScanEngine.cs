@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Security.Cryptography;
 
 namespace Malward.ResidentShield;
@@ -70,6 +70,14 @@ public sealed class ScanEngine : IDisposable
         if (_whitelist.IsAvailable)
             Log.Info("ScanEngine", $"Whitelist: {_whitelist.ActivePath}");
     }
+
+    private static bool IsCloudClearance(string? detail) =>
+        detail != null && detail.StartsWith("VPS→Cloud", StringComparison.Ordinal);
+
+    private bool IsCloudCleared(string sha256) =>
+        _verdictCache.TryGet(sha256, out var c, "", "") && c.Verdict == ScanVerdict.Clean && IsCloudClearance(c.Detail);
+
+    public bool CloudRescanActive => _config.CloudEnabled && _config.CloudRescanDetections;
 
     private string? ByodHit(string md5, string sha256) => _byod.Match(sha256, md5);
 
@@ -149,14 +157,18 @@ public sealed class ScanEngine : IDisposable
                                 + Path.GetFileName(filePath));
                 return new ScanResult(filePath, ScanVerdict.Clean, null, "whitelisted", sha256, md5);
             }
-            Log.Alert("VPS", $"HIT {Path.GetFileName(filePath)} → {detection}");
-            return new ScanResult(filePath, ScanVerdict.Threat, detection, "VPS local", sha256, md5);
+            if (!CloudRescanActive || Pipeline() == null)
+            {
+                Log.Alert("VPS", $"HIT {Path.GetFileName(filePath)} → {detection}");
+                return new ScanResult(filePath, ScanVerdict.Threat, detection, "VPS local", sha256, md5);
+            }
+            Log.Info("VPS", $"HIT {Path.GetFileName(filePath)} → {detection}; confirming with the cloud before acting.");
         }
 
-        if (string.IsNullOrEmpty(_malscanPath) && Pipeline() == null)
+        if (detection == null && string.IsNullOrEmpty(_malscanPath) && Pipeline() == null)
             return new ScanResult(filePath, ScanVerdict.Unknown, null, "silnik skanowania niedostępny", sha256, md5);
 
-        if (_verdictCache.TryGet(sha256, out var hit, filePath, md5))
+        if ((detection == null || IsCloudCleared(sha256)) && _verdictCache.TryGet(sha256, out var hit, filePath, md5))
         {
             Log.Debug("Cache", $"Verdict from cache ({hit.Verdict}): {Path.GetFileName(filePath)}");
             return hit;
@@ -165,7 +177,27 @@ public sealed class ScanEngine : IDisposable
         if (HasMarkOfTheWeb(filePath))
             Log.Debug("Reputation", $"File downloaded from the internet (MOTW): {Path.GetFileName(filePath)}");
 
-        var result = await ScanInProcessAsync(filePath, sha256, ct);
+        ScanResult result;
+        try { result = await ScanInProcessAsync(filePath, sha256, ct); }
+        catch (Exception ex) when (detection != null && ex is not OperationCanceledException)
+        {
+            result = new ScanResult(filePath, ScanVerdict.Error, null, ex.Message, sha256, md5);
+        }
+
+        if (detection != null)
+        {
+            if (result.Verdict == ScanVerdict.Clean)
+            {
+                Log.Info("VPS", $"{Path.GetFileName(filePath)}: the cloud did not confirm {detection} ({result.Detail}) — treated as clean.");
+                _verdictCache.Set(sha256, result);
+                return result with { Md5 = md5 };
+            }
+            if (result.Verdict != ScanVerdict.Threat)
+                result = new ScanResult(filePath, ScanVerdict.Threat, detection, "VPS local", sha256, md5);
+            Log.Alert("VPS", $"HIT {Path.GetFileName(filePath)} → {result.ThreatName} ({result.Detail})");
+            _verdictCache.Set(sha256, result);
+            return result with { Md5 = md5 };
+        }
 
         if (result.Verdict == ScanVerdict.Threat && !_whitelist.IsAvailable)
         {
@@ -201,6 +233,9 @@ public sealed class ScanEngine : IDisposable
 
             var hashes = HashesCached(filePath);
             var det = _vps.Lookup(hashes.Md5, hashes.Sha256);
+            if (det != null && _verdictCache.TryGet(hashes.Sha256, out var cached, filePath, hashes.Md5)
+                && cached.Verdict == ScanVerdict.Clean && IsCloudClearance(cached.Detail))
+                det = null;
             if (det != null)
             {
                 rep = ProcRep.VpsBad;
@@ -225,6 +260,8 @@ public sealed class ScanEngine : IDisposable
         }
     }
 
+    private Malward.Engine.Config.Settings? _pipelineSettings;
+
     private Malward.Engine.Core.ScanPipeline? Pipeline()
     {
         if (_pipeline != null) return _pipeline;
@@ -237,6 +274,8 @@ public sealed class ScanEngine : IDisposable
                 var settings = Malward.Engine.Config.Settings.Load();
 
                 if (!_config.CloudEnabled) settings.CloudScanEnabled = false;
+                settings.RealtimeCloudRescan = _config.CloudEnabled && _config.CloudRescanDetections;
+                _pipelineSettings = settings;
                 _pipeline = new Malward.Engine.Core.ScanPipeline(settings);
                 if (_pipelineFailures > 0)
                     Log.Info("ScanEngine", $"In-process engine rebuilt after {_pipelineFailures} failed attempts.");
@@ -266,7 +305,12 @@ public sealed class ScanEngine : IDisposable
 
         try
         {
-            var r = await Task.Run(() => pipe.ScanRealtime(filePath), ct).WaitAsync(TimeSpan.FromSeconds(60), ct);
+            if (_pipelineSettings != null)
+                _pipelineSettings.RealtimeCloudRescan = _config.CloudEnabled && _config.CloudRescanDetections;
+            int seconds = Math.Clamp(_config.ScanTimeoutSec, 10, 600);
+            if (_config.CloudEnabled && _config.CloudRescanDetections) seconds = Math.Max(seconds, 180);
+            var limit = TimeSpan.FromSeconds(seconds);
+            var r = await Task.Run(() => pipe.ScanRealtime(filePath), ct).WaitAsync(limit, ct);
             bool cloudChecked = _config.CloudEnabled;
 
             switch (r.Verdict)
@@ -275,7 +319,7 @@ public sealed class ScanEngine : IDisposable
                     return new ScanResult(filePath, ScanVerdict.Threat, r.Detection ?? "Unknown",
                                           r.Source, sha256, CloudChecked: cloudChecked);
                 case Malward.Engine.Core.Verdict.Clean:
-                    return new ScanResult(filePath, ScanVerdict.Clean, null, null, sha256, CloudChecked: cloudChecked);
+                    return new ScanResult(filePath, ScanVerdict.Clean, null, r.Source, sha256, CloudChecked: cloudChecked);
                 case Malward.Engine.Core.Verdict.Skipped:
                 {
                     bool encrypted = (r.Source ?? "").Contains("encrypted", StringComparison.OrdinalIgnoreCase);

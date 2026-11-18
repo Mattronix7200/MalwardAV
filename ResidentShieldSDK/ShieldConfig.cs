@@ -64,6 +64,8 @@ public sealed class ShieldConfig
     [JsonPropertyName("behavior_monitor")]
     public bool BehaviorMonitorEnabled { get; set; } = true;
 
+    [JsonIgnore] public bool BehaviorOnly { get; set; }
+
     [JsonPropertyName("behavior_file_tracking")]
     public bool BehaviorFileTrackingEnabled { get; set; } = true;
 
@@ -120,6 +122,12 @@ public sealed class ShieldConfig
 
     [JsonPropertyName("cloud_enabled")]
     public bool CloudEnabled          { get; set; } = true;
+
+    [JsonPropertyName("cloud_rescan_detections")]
+    public bool CloudRescanDetections { get; set; } = true;
+
+    [JsonPropertyName("scan_timeout_sec")]
+    public int ScanTimeoutSec { get; set; } = 60;
 
     [JsonPropertyName("network_shield_enabled")]
     public bool NetworkShieldEnabled  { get; set; } = true;
@@ -364,9 +372,9 @@ public sealed class ShieldConfig
         }
     }
 
-    public readonly record struct ModuleFlags(bool Resident, bool Network, bool Backup);
+    public readonly record struct ModuleFlags(bool Resident, bool Network, bool Backup, bool Behavior);
 
-    private static ModuleFlags _moduleFlagsCached = new(true, true, true);
+    private static ModuleFlags _moduleFlagsCached = new(true, true, true, true);
     private static long _moduleFlagsReadAt = long.MinValue;
 
     public static ModuleFlags ModuleFlagsNow()
@@ -378,7 +386,7 @@ public sealed class ShieldConfig
                 && System.Diagnostics.Stopwatch.GetElapsedTime(_moduleFlagsReadAt, now) < FlagPeekTtl)
                 return _moduleFlagsCached;
 
-            bool resident = true, network = true;
+            bool resident = true, network = true, behavior = true;
             try
             {
                 if (File.Exists(ConfigPath))
@@ -389,13 +397,16 @@ public sealed class ShieldConfig
                         if (doc.RootElement.TryGetProperty("resident_shield_enabled", out var r)
                             && r.ValueKind == JsonValueKind.False)
                             resident = false;
+                        if (doc.RootElement.TryGetProperty("behavior_monitor", out var bm)
+                            && bm.ValueKind == JsonValueKind.False)
+                            behavior = false;
                         if (doc.RootElement.TryGetProperty("network_shield_enabled", out var n)
                             && n.ValueKind == JsonValueKind.False)
                             network = false;
                     }
                 }
             }
-            catch { resident = true; network = true; }
+            catch { resident = true; network = true; behavior = true; }
 
             bool backup = ModuleBridge.BackupInstalled;
             try
@@ -412,7 +423,7 @@ public sealed class ShieldConfig
             }
             catch { backup = true; }
 
-            _moduleFlagsCached = new ModuleFlags(resident, network, backup);
+            _moduleFlagsCached = new ModuleFlags(resident, network, backup, behavior);
             _moduleFlagsReadAt = now;
             return _moduleFlagsCached;
         }

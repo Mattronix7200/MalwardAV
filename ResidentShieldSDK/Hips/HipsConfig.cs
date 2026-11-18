@@ -8,6 +8,8 @@ public sealed class HipsConfig
     private readonly object _lock = new();
     private Dictionary<string, (bool Enabled, HipsRules.Mode Mode)> _state = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, List<string>> _exceptions = new(StringComparer.OrdinalIgnoreCase);
+    private List<string> _learned = new();
+    private const int LearnedCap = 2000;
     private DateTime _loadedAt = DateTime.MinValue;
 
     public static string DefaultPath => Path.Combine(
@@ -20,6 +22,25 @@ public sealed class HipsConfig
 
     public string Tier { get; private set; } = "medium";
 
+    public string Level { get; private set; } = "low";
+
+    public static Func<string, bool>? KnownThreat;
+
+    public static string DefaultLevelFor(string? tier) => (tier ?? "").Trim().ToLowerInvariant() switch
+    {
+        "paranoic" => "high",
+        "high"     => "medium",
+        _          => "low",
+    };
+
+    private static string NormalizeLevel(string? level) => (level ?? "").Trim().ToLowerInvariant() switch
+    {
+        "high"   => "high",
+        "medium" => "medium",
+        "low"    => "low",
+        _        => "",
+    };
+
     public void Load()
     {
         lock (_lock)
@@ -27,12 +48,21 @@ public sealed class HipsConfig
             var fresh = new Dictionary<string, (bool, HipsRules.Mode)>(StringComparer.OrdinalIgnoreCase);
 
             string? materializeTier = null;
+            string level = "";
+            var freshLearned = new List<string>();
             try
             {
                 if (File.Exists(_path) && JsonNode.Parse(File.ReadAllText(_path)) is JsonObject o)
                 {
                     bool hasRules = o["rules"] is JsonObject rr && rr.Count > 0;
                     string? tier = o["tier"]?.GetValue<string>();
+                    level = NormalizeLevel(o["level"]?.GetValue<string>());
+                    if (o["learned"] is JsonArray la)
+                        foreach (var item in la)
+                        {
+                            var v = item?.GetValue<string>();
+                            if (!string.IsNullOrWhiteSpace(v)) freshLearned.Add(v.Trim());
+                        }
 
                     if (!string.IsNullOrWhiteSpace(tier)) Tier = tier.Trim().ToLowerInvariant();
                     if (!hasRules && !string.IsNullOrWhiteSpace(tier))
@@ -61,6 +91,8 @@ public sealed class HipsConfig
             }
             catch {  }
             if (materializeTier != null) Tier = materializeTier.Trim().ToLowerInvariant();
+            Level = level.Length > 0 ? level : DefaultLevelFor(Tier);
+            _learned = freshLearned;
 
             HipsTrust.TrustSignedInUserArea = Tier is "low" or "medium";
             if (materializeTier != null)
@@ -232,9 +264,62 @@ public sealed class HipsConfig
             var (on, mode) = StateOf(rule.Id);
             if (!on) continue;
             if (IsExcepted(rule.Id, path)) return null;
-            return (rule, mode);
+            if (LevelNow != "low" && IsLearned(path) && !IsKnownThreat(path)) return null;
+            return (rule, EffectiveMode(mode, path));
         }
         return null;
+    }
+
+    public string LevelNow { get { RefreshIfStale(); return Level; } }
+
+    public HipsRules.Mode EffectiveMode(HipsRules.Mode configured, string? path)
+    {
+        switch (LevelNow)
+        {
+            case "medium":
+                return HipsRules.Mode.Ask;
+            case "low":
+                if (IsKnownThreat(path)) return HipsRules.Mode.Ask;
+                Learn(path);
+                return HipsRules.Mode.Log;
+            default:
+                return configured;
+        }
+    }
+
+    public static bool IsKnownThreat(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || KnownThreat == null) return false;
+        try { return KnownThreat(path); }
+        catch { return false; }
+    }
+
+    public bool IsAppExcepted(string? path) => IsExcepted("*", path);
+
+    public bool IsLearned(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        RefreshIfStale();
+        lock (_lock)
+            return _learned.Any(l => string.Equals(l, path, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public void Learn(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path)) return;
+        try
+        {
+            if (File.Exists(_path) && File.GetLastWriteTimeUtc(_path) > _loadedAt) Load();
+        }
+        catch { }
+        lock (_lock)
+        {
+            if (_learned.Any(l => string.Equals(l, path, StringComparison.OrdinalIgnoreCase))) return;
+            if (_learned.Count >= LearnedCap) _learned.RemoveAt(0);
+            _learned.Add(path.Trim());
+            WriteFile(Enabled, _state, _exceptions);
+        }
+        Log.Info("HIPS", $"Learning mode: added an automatic rule for {path}");
     }
 
     public void Save(bool enabled, IEnumerable<(string Id, bool On, string Mode)> rules)
@@ -282,7 +367,7 @@ public sealed class HipsConfig
                            Dictionary<string, (bool Enabled, HipsRules.Mode Mode)> state,
                            Dictionary<string, List<string>> exceptions)
     {
-        var o = new JsonObject { ["enabled"] = enabled, ["tier"] = Tier };
+        var o = new JsonObject { ["enabled"] = enabled, ["tier"] = Tier, ["level"] = Level };
         var r = new JsonObject();
         foreach (var kv in state)
             r[kv.Key] = new JsonObject { ["on"] = kv.Value.Enabled, ["mode"] = ModeName(kv.Value.Mode) };
@@ -297,6 +382,10 @@ public sealed class HipsConfig
             ex[kv.Key] = arr;
         }
         o["exceptions"] = ex;
+
+        var learned = new JsonArray();
+        foreach (var l in _learned) learned.Add(l);
+        o["learned"] = learned;
 
         try
         {

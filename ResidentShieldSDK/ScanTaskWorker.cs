@@ -329,6 +329,10 @@ public sealed class ScanTaskWorker : BackgroundService
         try { await reader; } catch { }
         try { await drainErrors; } catch { }
 
+        int swept = Malward.Engine.Util.Paths.SweepWorkingDir();
+        if (swept > 0)
+            Log.Info("ScanTask", $"Scan {req.Id}: removed {swept} leftover archive working folder(s).");
+
         if (cancelled) return -1;
         try { return proc.ExitCode; } catch { return 2; }
     }

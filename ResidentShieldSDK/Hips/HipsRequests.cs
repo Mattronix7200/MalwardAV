@@ -11,6 +11,8 @@ public static class HipsRequests
     private static string RequestPath => Path.Combine(Dir, "hips-undo-request.json");
     private static string ResultPath  => Path.Combine(Dir, "hips-undo-result.json");
 
+    public static Func<int, string, string, bool>? BehaviorBlock;
+
     public static void Request(JsonObject undoRecord)
     {
         try
@@ -42,7 +44,17 @@ public static class HipsRequests
             var kind   = req["kind"]?.GetValue<string>() ?? "";
             var doFix  = string.Equals(req["action"]?.GetValue<string>(), "fix", StringComparison.OrdinalIgnoreCase);
 
-            if (doFix && string.Equals(kind, "file", StringComparison.OrdinalIgnoreCase))
+            if (doFix && string.Equals(kind, "behavior", StringComparison.OrdinalIgnoreCase))
+            {
+                int pid = req["pid"]?.GetValue<int>() ?? 0;
+                var path = req["path"]?.GetValue<string>() ?? "";
+                var category = req["category"]?.GetValue<string>() ?? "Behaviour";
+                ok = BehaviorBlock != null && pid > 0 && BehaviorBlock(pid, path, category);
+                message = ok
+                    ? Loc.F("Zablokowano i cofnięto zmiany: {0}", Path.GetFileName(path))
+                    : Loc.T("Nie udało się zablokować procesu — mógł się już zakończyć.");
+            }
+            else if (doFix && string.Equals(kind, "file", StringComparison.OrdinalIgnoreCase))
             {
                 var rule = req["rule"]?.GetValue<string>() ?? "";
                 var path = req["path"]?.GetValue<string>() ?? "";

@@ -77,12 +77,15 @@ public sealed class ShieldService : IAsyncDisposable
         AutoExcludeSelfDirectory();
         BehaviorTrust.Apply(_hips.Tier, _config.BehaviorTrustSigned);
         Log.Info("Behavior", "Trust: " + BehaviorTrust.Describe(_hips.Tier));
+        Hips.HipsConfig.KnownThreat = path => _scanner.QuickVerdict(path).Verdict == ScanVerdict.Threat;
+        Hips.HipsRequests.BehaviorBlock = BlockBehaviorOnRequest;
+        Log.Info("Behavior", $"Behaviour monitor level: {_hips.LevelNow}");
         _activity.Start();
 
         for (int i = 0; i < _workers.Length; i++)
             _workers[i] = Task.Run(() => ScanWorkerAsync(ct), ct);
 
-        if (_config.FileMonitorEnabled)
+        if (_config.FileMonitorEnabled && !_config.BehaviorOnly)
         {
             var usnVolumes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (_config.UsnJournalEnabled)
@@ -110,16 +113,23 @@ public sealed class ShieldService : IAsyncDisposable
 
         if (_config.ProcessMonitorEnabled)
         {
-            _etw = new EtwMonitor(_config, _tracker, _rollback, OnBehaviorAlert, OnFileEvent, _bombGuard,
+            _etw = new EtwMonitor(_config, _tracker, _rollback, OnBehaviorAlert,
+                                  _config.BehaviorOnly ? null : OnFileEvent, _bombGuard,
                                   (detector, path) => _hips.Decide(detector, path) != null);
             _etw.Start(ct);
 
-            _wmi = new WmiProcessMonitor(_config, _tracker, OnFileEvent);
-            _wmi.Start();
+            if (!_config.BehaviorOnly)
+            {
+                _wmi = new WmiProcessMonitor(_config, _tracker, OnFileEvent);
+                _wmi.Start();
+            }
         }
 
-        _pipe = new HookPipe(_scanner, _config, ct);
-        _pipe.Start();
+        if (!_config.BehaviorOnly)
+        {
+            _pipe = new HookPipe(_scanner, _config, ct);
+            _pipe.Start();
+        }
 
         SyncRemovableWatcher();
 
@@ -186,7 +196,9 @@ public sealed class ShieldService : IAsyncDisposable
                 return Task.FromResult(false);
             }
 
+            bool behaviorOnly = _config.BehaviorOnly;
             _config.CopyFrom(fresh);
+            _config.BehaviorOnly = behaviorOnly;
             BehaviorTrust.Apply(_hips.Tier, _config.BehaviorTrustSigned);
             Log.Info("Behavior", "Trust: " + BehaviorTrust.Describe(_hips.Tier));
             _fileWatcher?.ApplySettings();
@@ -207,7 +219,7 @@ public sealed class ShieldService : IAsyncDisposable
     {
         try
         {
-            if (_config.ScanRemovable && _removable == null)
+            if (_config.ScanRemovable && !_config.BehaviorOnly && _removable == null)
             {
                 _removable = new RemovableScanWatcher(_scanner.MalscanPath);
                 _removable.Start();
@@ -399,6 +411,27 @@ public sealed class ShieldService : IAsyncDisposable
             }
             catch { }
 
+            if (r.Verdict == ScanVerdict.Threat && _scanner.CloudRescanActive)
+            {
+                ScanResult? confirmed = null;
+                try
+                {
+                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+                    cts.CancelAfter(TimeSpan.FromSeconds(Math.Max(60, _config.ScanTimeoutSec)));
+                    confirmed = await _scanner.ScanAsync(subject, cts.Token);
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception ex) { Log.Error("Gate", $"cloud confirmation of {subject}: {ex.Message}"); }
+
+                if (confirmed?.Verdict == ScanVerdict.Clean)
+                {
+                    Log.Info("Gate", $"{Path.GetFileName(subject)}: database hit not confirmed by the cloud — launch allowed.");
+                    NativeProcess.Resume(pid);
+                    return;
+                }
+                if (confirmed?.Verdict == ScanVerdict.Threat) r = confirmed;
+            }
+
             if (r.Verdict == ScanVerdict.Threat)
             {
                 Log.Alert("Gate", $"BLOCKED before execution: {Path.GetFileName(subject)} → {r.ThreatName}");
@@ -492,6 +525,63 @@ public sealed class ShieldService : IAsyncDisposable
 
     private bool StrictProfile => _hips.Tier is "high" or "paranoic";
 
+    private bool HandleByLevel(BehaviorAlert alert, ProcessInfo proc)
+    {
+        string level = _hips.LevelNow;
+        if (level == "high")
+        {
+            if (!_hips.IsLearned(proc.ImagePath)) return false;
+            Log.Info("Behavior", $"Automatic rule (learned) for {proc.ImagePath}: {alert.Category} ignored.");
+            return true;
+        }
+
+        bool threat = Hips.HipsConfig.IsKnownThreat(proc.ImagePath);
+        if (level == "low" && !threat)
+        {
+            _hips.Learn(proc.ImagePath);
+            Log.Info("Behavior", $"Learning mode: {alert.Category} for PID {proc.Pid} ({proc.Name}) recorded, "
+                               + "no reaction.");
+            _activity.ReportHips("*", alert.Category, proc.Name, proc.ImagePath, alert.Description, "log");
+            return true;
+        }
+
+        if (level == "medium" && !threat && _hips.IsLearned(proc.ImagePath))
+        {
+            Log.Info("Behavior", $"Automatic rule (learned) for {proc.ImagePath}: {alert.Category} ignored.");
+            return true;
+        }
+
+        var fix = new System.Text.Json.Nodes.JsonObject
+        {
+            ["kind"] = "behavior",
+            ["pid"] = proc.Pid,
+            ["path"] = proc.ImagePath ?? "",
+            ["category"] = alert.Category,
+        };
+        _activity.ReportHips("*", alert.Category, proc.Name, proc.ImagePath, alert.Description, "ask", fix: fix);
+        Log.Alert("Behavior", $"{alert.Category} | PID {proc.Pid} ({proc.Name}) — asking the user "
+                            + $"(level: {level}{(threat ? ", known threat" : "")})");
+        _notify.Threat("Suspicious behavior detected", proc.ImagePath ?? "", alert.Category, AlertSeverity.Medium);
+        return true;
+    }
+
+    private bool BlockBehaviorOnRequest(int pid, string path, string category)
+    {
+        try
+        {
+            var proc = new ProcessInfo(pid, 0, Path.GetFileName(path), path, "", DateTimeOffset.UtcNow);
+            var alert = new BehaviorAlert(pid, Path.GetFileName(path), BehaviorSeverity.High, category,
+                                          "Blocked by the user from the question window");
+            _handler.HandleBehaviorAsync(alert, proc, _cts.Token).GetAwaiter().GetResult();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Behavior", $"Blocking on request failed: {ex.Message}");
+            return false;
+        }
+    }
+
     private void OnDangerousConnection(int pid, string processName, string imagePath,
                                        string remoteIp, int remotePort, string detection)
     {
@@ -509,6 +599,13 @@ public sealed class ShieldService : IAsyncDisposable
 
     private void OnBehaviorAlert(BehaviorAlert alert, ProcessInfo proc)
     {
+        if (_hips.IsAppExcepted(proc.ImagePath))
+        {
+            Log.Info("Behavior", $"User rule for this application, alert ignored by every behaviour module: "
+                               + $"{alert.Category} PID {proc.Pid} ({proc.ImagePath})");
+            return;
+        }
+
         if (IsExcludedImage(proc.ImagePath) && (!IsHardRansomSignal(alert.Category) || !StrictProfile))
         {
             Log.Info("Behavior", $"Excluded by the user, alert ignored: {alert.Category} PID {proc.Pid} ({proc.ImagePath})");
@@ -543,6 +640,8 @@ public sealed class ShieldService : IAsyncDisposable
             Log.Debug("HIPS", $"Rule disabled by the user — skipping {alert.Category} for PID {proc.Pid}.");
             return;
         }
+
+        if (!IsHardRansomSignal(alert.Category) && HandleByLevel(alert, proc)) return;
 
         // Tani podglad PRZED zamrozeniem. Zawieszenie i wznowienie procesu, ktory i tak
         // okaze sie zaufany, potrafi rozwalic aktualizator w trakcie pobierania - a wlasnie

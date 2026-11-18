@@ -102,7 +102,7 @@ public static class Log
     {
         if (lvl < MinLevel) return;
 
-        _queue.TryAdd((lvl, $"{Stamp()} {Prefix(lvl)} [{tag}] {msg}"));
+        _queue.TryAdd((lvl, $"{Stamp()} {Prefix(lvl)} [{tag}] {LogEnglish.Apply(msg)}"));
     }
 
     private static string Stamp() => DateTime.Now.ToString("HH:mm:ss.fff");
