@@ -62,7 +62,7 @@ internal static class BlockPageRenderer
         return BlockKind.Threat;
     }
 
-    public static string Render(string host, string? detection, string? source)
+    public static string Render(string host, string? detection, string? source, string? allowToken = null)
     {
         string safeHost = Escape(host);
         var kind = KindOf(detection, source);
@@ -105,7 +105,7 @@ internal static class BlockPageRenderer
         {
             BlockKind.Ads      => Malward.Engine.Util.Loc.T("Ta domena nie zawiera treści strony, którą chcesz obejrzeć — serwuje wyłącznie reklamy. Nic nie zostało usunięte z komputera. Jeśli bez niej strona nie działa, wyłącz wybraną listę filtrów w aplikacji Malward → Ochrona → Listy filtrów."),
             BlockKind.Tracking => Malward.Engine.Util.Loc.T("Ta domena zbiera dane o tym, co oglądasz, i przekazuje je dalej. Nic nie zostało usunięte z komputera. Jeśli bez niej strona nie działa, wyłącz wybraną listę filtrów w aplikacji Malward → Ochrona → Listy filtrów."),
-            _                  => Malward.Engine.Util.Loc.T("Strona została zaklasyfikowana jako szkodliwa lub niezaufana. Otwarcie jej może prowadzić do wyłudzenia danych, pobrania złośliwego pliku albo śledzenia użytkownika. Jeśli masz pewność, że to fałszywy alarm, dodaj domenę ręcznie w aplikacji Malward → Ochrona → Ustawienia osłony sieciowej."),
+            _                  => Malward.Engine.Util.Loc.T("Strona została zaklasyfikowana jako szkodliwa lub niezaufana. Otwarcie jej może prowadzić do wyłudzenia danych, pobrania złośliwego pliku albo śledzenia użytkownika. Jeśli masz pewność, że to fałszywy alarm, dodaj domenę do wyjątków przyciskiem poniżej."),
         };
 
         string headerColor = kind == BlockKind.Threat ? "#c42b2b" : "#b4690e";
@@ -139,7 +139,7 @@ internal static class BlockPageRenderer
       <div class=""actions"">
         <button class=""btn-back"" type=""button"" onclick=""history.length&gt;1?history.back():window.close()"">
           ← {Malward.Engine.Util.Loc.T("Zabierz mnie stąd")}
-        </button>
+        </button>{AllowForm(host, allowToken)}
       </div>
       <div class=""foot"">
         <div class=""brand"">{footerLogo}<span class=""brand-text"">Malward<sup class=""brand-tm"">®</sup> Cloud Scanner</span></div>
@@ -149,16 +149,31 @@ internal static class BlockPageRenderer
   </main>");
     }
 
-    public static string RenderAdded(string domain, bool ok)
+    private static string AllowForm(string host, string? token)
+    {
+        if (string.IsNullOrEmpty(token)) return "";
+        string domain = BlockPageAllow.ExceptionDomainFor(host);
+        string label = Malward.Engine.Util.Loc.T("Dodaj {0} do wyjątków").Replace("{0}", domain);
+        return $@"
+        <form method=""post"" action=""{BlockPageAllow.Endpoint}?t={Escape(token!)}"" style=""display:inline"">
+          <button class=""btn-add"" type=""submit"">{Escape(label)}</button>
+        </form>";
+    }
+
+    public static string RenderAdded(string domain, bool ok, bool rejected = false, string? revisit = null)
     {
         string safeHost = Escape(domain);
         string headerColor = ok ? "#1f7a35" : "#a31e1e";
-        string headerTitle = ok ? "Dodano do wyjątków" : "Nie udało się dodać do wyjątków";
+        string headerTitle = ok
+            ? Malward.Engine.Util.Loc.T("Dodano do wyjątków")
+            : Malward.Engine.Util.Loc.T("Nie udało się dodać do wyjątków");
+        string again = string.IsNullOrEmpty(revisit) ? ""
+            : $@"<p style=""margin-top:14px""><a class=""btn-add"" href=""//{Escape(revisit!)}/"">{Escape(Malward.Engine.Util.Loc.T("Przejdź do strony"))}</a></p>";
         string message = ok
-            ? $"Domena <strong>{safeHost}</strong> została dodana do listy wyjątków osłony sieciowej i jest <strong>aktywna natychmiast</strong>. " +
-              "Odśwież stronę w przeglądarce — powinna już działać normalnie."
-            : $"Nie udało się zapisać wpisu <strong>{safeHost}</strong> w pliku konfiguracji. " +
-              "Spróbuj dodać domenę ręcznie w aplikacji Malward → Ochrona → Ustawienia osłony.";
+            ? Malward.Engine.Util.Loc.T("Domena <strong>{0}</strong> i jej subdomeny zostały dodane do wyjątków osłony sieciowej. Wyjątek działa od razu, bez restartu osłony. Jeśli przeglądarka nadal pokazuje blokadę, odczekaj minutę albo odśwież stronę.").Replace("{0}", safeHost) + again
+            : rejected
+                ? Malward.Engine.Util.Loc.T("Ta prośba o wyjątek wygasła albo nie pochodzi ze strony blokady. Odśwież zablokowaną stronę i użyj przycisku jeszcze raz.")
+                : Malward.Engine.Util.Loc.T("Nie udało się zapisać wpisu <strong>{0}</strong> w pliku konfiguracji. Dodaj domenę ręcznie w aplikacji Malward → Ochrona → Ustawienia osłony sieciowej.").Replace("{0}", safeHost);
 
         return RenderShell(
             title: ok ? "Malward — dodano wyjątek" : "Malward — błąd",

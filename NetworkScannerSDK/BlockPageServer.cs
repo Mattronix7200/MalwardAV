@@ -114,6 +114,14 @@ public sealed class BlockPageServer : IDisposable
             var raw = Encoding.ASCII.GetString(buf, 0, headersEnd);
             string host = ExtractHost(raw) ?? "?";
 
+            int eol = raw.IndexOf("\r\n", StringComparison.Ordinal);
+            string requestLine = eol > 0 ? raw[..eol] : raw;
+            if (BlockPageAllow.TryHandle(requestLine, host, out var allowHtml))
+            {
+                await WriteHtmlAsync(ns, allowHtml);
+                return;
+            }
+
             string? det = null; string? src = null;
             if (_recent.TryGetValue(host, out var info) && DateTime.UtcNow - info.When < RecentTtl)
             {
@@ -141,7 +149,7 @@ public sealed class BlockPageServer : IDisposable
                 return;
             }
 
-            var html = BlockPageRenderer.Render(host, det, src);
+            var html = BlockPageRenderer.Render(host, det, src, BlockPageAllow.Issue(host));
             var bytes = Encoding.UTF8.GetBytes(html);
 
             var resp =
@@ -162,6 +170,23 @@ public sealed class BlockPageServer : IDisposable
         catch { }
         finally { try { client.Close(); } catch { } }
     }
+
+    private static async Task WriteHtmlAsync(Stream ns, string html)
+    {
+        var bytes = Encoding.UTF8.GetBytes(html);
+        var head =
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: text/html; charset=utf-8\r\n" +
+            $"Content-Length: {bytes.Length}\r\n" +
+            "Cache-Control: no-store\r\n" +
+            "X-Malward-Block: 1\r\n" +
+            "Connection: close\r\n\r\n";
+        await ns.WriteAsync(Encoding.ASCII.GetBytes(head));
+        await ns.WriteAsync(bytes);
+        await ns.FlushAsync();
+    }
+
+    public static Task WriteHtmlPublicAsync(Stream ns, string html) => WriteHtmlAsync(ns, html);
 
     public static bool AcceptsHtml(string rawHeaders)
     {
@@ -254,79 +279,96 @@ public sealed class BlockPageServer : IDisposable
             return false;
         }
 
-        lock (_exclusionsLock)
+        Exception? last = null;
+        for (int attempt = 0; attempt < 6; attempt++)
         {
+            if (attempt > 0) System.Threading.Thread.Sleep(120 * attempt);
             try
             {
-                var path = NetworkConfig.DefaultPath;
-                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-
-                System.Text.Json.Nodes.JsonObject root;
-                if (File.Exists(path))
-                {
-                    string raw;
-                    try { raw = File.ReadAllText(path); }
-                    catch (IOException io)
-                    {
-                        Log.Warn("BlockPage", $"AddDomainToExclusions: ReadAllText('{path}') failed ({io.Message}). " +
-                                              "Session exclusion is live — file entry deferred until service restart.");
-                        return true;
-                    }
-                    root = (System.Text.Json.Nodes.JsonNode.Parse(raw) as System.Text.Json.Nodes.JsonObject)
-                           ?? new System.Text.Json.Nodes.JsonObject();
-                }
-                else
-                {
-                    root = new System.Text.Json.Nodes.JsonObject();
-                }
-
-                var existing = root["exclusions"] as System.Text.Json.Nodes.JsonArray;
-                var excl = existing ?? new System.Text.Json.Nodes.JsonArray();
-
-                foreach (var n in excl)
-                {
-                    var s = n?.GetValue<string>();
-                    if (!string.IsNullOrEmpty(s) && string.Equals(s, d, StringComparison.OrdinalIgnoreCase))
-                    {
-                        Log.Info("BlockPage", $"Domain '{d}' was already in exclusions — session synchronized.");
-                        return true;
-                    }
-                }
-                excl.Add(d);
-                if (existing == null) root["exclusions"] = excl;
-
-                var tmp = path + ".tmp";
-                File.WriteAllText(tmp, root.ToJsonString(
-                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
-                if (File.Exists(path))
-                {
-                    try { File.Replace(tmp, path, destinationBackupFileName: null, ignoreMetadataErrors: true); }
-                    catch (IOException)
-                    {
-                        File.Delete(path);
-                        File.Move(tmp, path);
-                    }
-                }
-                else
-                {
-                    File.Move(tmp, path);
-                }
-
-                Log.Info("BlockPage", $"Added '{d}' to exclusions (JSON + session) — active from NOW");
+                lock (_exclusionsLock) PersistExclusion(d);
                 return true;
             }
-            catch (UnauthorizedAccessException ua)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
             {
-                Log.Warn("BlockPage", $"AddDomainToExclusions: no permission for '{NetworkConfig.DefaultPath}' ({ua.Message}). " +
-                                      "Session exclusion IS LIVE — the shield allows the domain, but the entry will not survive a service restart.");
-                return true;
+                last = ex;
             }
             catch (Exception ex)
             {
-                Log.Warn("BlockPage", $"AddDomainToExclusions failed: {ex.GetType().Name}: {ex.Message}");
-                return false;
+                last = ex;
+                break;
             }
         }
+
+        Log.Warn("BlockPage", $"AddDomainToExclusions: writing '{NetworkConfig.DefaultPath}' failed " +
+                              $"({last?.GetType().Name}: {last?.Message}). The session exclusion is live; retrying in the background.");
+        string pending = d;
+        _ = Task.Run(async () =>
+        {
+            for (int i = 0; i < 20; i++)
+            {
+                await Task.Delay(3000);
+                try
+                {
+                    lock (_exclusionsLock) PersistExclusion(pending);
+                    Log.Info("BlockPage", $"Exclusion '{pending}' saved to the configuration file after a retry.");
+                    return;
+                }
+                catch { }
+            }
+            Log.Warn("BlockPage", $"Exclusion '{pending}' could not be saved; it stays active until the service restarts.");
+        });
+        return NetworkConfig.SessionExclusions.ContainsKey(d);
+    }
+
+    private static void PersistExclusion(string d)
+    {
+        var path = NetworkConfig.DefaultPath;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+
+        System.Text.Json.Nodes.JsonObject root = new();
+        if (File.Exists(path))
+        {
+            string raw;
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                       FileShare.ReadWrite | FileShare.Delete))
+            using (var sr = new StreamReader(fs))
+                raw = sr.ReadToEnd();
+            if (!string.IsNullOrWhiteSpace(raw))
+                root = System.Text.Json.Nodes.JsonNode.Parse(raw) as System.Text.Json.Nodes.JsonObject
+                       ?? throw new System.Text.Json.JsonException("network settings root is not an object");
+        }
+
+        var excl = root["exclusions"] as System.Text.Json.Nodes.JsonArray;
+        if (excl == null) { excl = new System.Text.Json.Nodes.JsonArray(); root["exclusions"] = excl; }
+
+        foreach (var n in excl)
+        {
+            string? s = n is System.Text.Json.Nodes.JsonValue v && v.TryGetValue<string>(out var str) ? str : null;
+            if (!string.IsNullOrEmpty(s) && string.Equals(s.Trim().TrimStart('.'), d, StringComparison.OrdinalIgnoreCase))
+            {
+                Log.Info("BlockPage", $"Domain '{d}' was already in exclusions — session synchronized.");
+                return;
+            }
+        }
+        excl.Add(d);
+
+        var tmp = path + "." + Environment.ProcessId + ".tmp";
+        File.WriteAllText(tmp, root.ToJsonString(
+            new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        try
+        {
+            if (File.Exists(path))
+                File.Replace(tmp, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
+            else
+                File.Move(tmp, path);
+        }
+        catch (IOException)
+        {
+            File.Copy(tmp, path, overwrite: true);
+            try { File.Delete(tmp); } catch { }
+        }
+
+        Log.Info("BlockPage", $"Added '{d}' to exclusions (JSON + session) — active from NOW");
     }
 
     private static async Task WriteResponse(NetworkStream ns, string html)
@@ -361,4 +403,107 @@ public sealed class BlockPageServer : IDisposable
 #endif
 
     public void Dispose() => Stop();
+}
+
+public static class BlockPageAllow
+{
+    public const string Endpoint = "/__malward/allow";
+
+    private static readonly ConcurrentDictionary<string, (string Host, DateTime ExpiresUtc)> Tokens =
+        new(StringComparer.Ordinal);
+    private static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(15);
+
+    public static string Issue(string host)
+    {
+        Sweep();
+        var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16))
+                           .ToLowerInvariant();
+        Tokens[token] = (NormalizeHost(host), DateTime.UtcNow + Lifetime);
+        return token;
+    }
+
+    public static string ExceptionDomainFor(string host)
+    {
+        var h = NormalizeHost(host);
+        try
+        {
+            var reg = AdBlock.AdFilterRule.RegistrableDomain(h);
+            return string.IsNullOrEmpty(reg) ? h : reg;
+        }
+        catch { return h; }
+    }
+
+    public static bool TryHandle(string requestLine, string host, out string html)
+    {
+        html = "";
+        var parts = (requestLine ?? "").Trim().Split(' ');
+        if (parts.Length < 2) return false;
+
+        string target = parts[1];
+        if (target.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            || target.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            try { target = new Uri(target).PathAndQuery; }
+            catch { return false; }
+        }
+        int q = target.IndexOf('?');
+        string path = q < 0 ? target : target[..q];
+        if (!path.Equals(Endpoint, StringComparison.OrdinalIgnoreCase)) return false;
+
+        string who = NormalizeHost(host);
+        if (!parts[0].Equals("POST", StringComparison.OrdinalIgnoreCase))
+        {
+            html = BlockPageRenderer.RenderAdded(ExceptionDomainFor(who), ok: false, rejected: true);
+            return true;
+        }
+
+        string token = BlockPageServer.ExtractQueryParamPublic(target, "t");
+        if (string.IsNullOrEmpty(token)
+            || !Tokens.TryRemove(token, out var entry)
+            || entry.ExpiresUtc < DateTime.UtcNow
+            || !string.Equals(entry.Host, who, StringComparison.OrdinalIgnoreCase))
+        {
+            Log.Warn("BlockPage", $"Exception request for '{who}' refused: missing, expired or foreign token.");
+            html = BlockPageRenderer.RenderAdded(ExceptionDomainFor(who), ok: false, rejected: true);
+            return true;
+        }
+
+        string domain = ExceptionDomainFor(entry.Host);
+        bool ok = BlockPageServer.AddDomainToExclusionsPublic(domain);
+        if (ok) DnsCache.Flush();
+        Log.Info("BlockPage", ok
+            ? $"Exception added from the block page: {domain} (requested on {entry.Host})."
+            : $"Exception from the block page failed for {domain}.");
+        html = BlockPageRenderer.RenderAdded(domain, ok, rejected: false, revisit: entry.Host);
+        return true;
+    }
+
+    private static string NormalizeHost(string host)
+    {
+        var h = (host ?? "").Trim().ToLowerInvariant();
+        if (h.StartsWith('[')) return h;
+        int colon = h.LastIndexOf(':');
+        if (colon > 0) h = h[..colon];
+        return h.TrimEnd('.');
+    }
+
+    private static void Sweep()
+    {
+        if (Tokens.Count < 256) return;
+        var now = DateTime.UtcNow;
+        foreach (var kv in Tokens)
+            if (kv.Value.ExpiresUtc < now) Tokens.TryRemove(kv.Key, out _);
+    }
+}
+
+public static class DnsCache
+{
+    [System.Runtime.InteropServices.DllImport("dnsapi.dll", EntryPoint = "DnsFlushResolverCache")]
+    private static extern bool DnsFlushResolverCache();
+
+    public static void Flush()
+    {
+        try { DnsFlushResolverCache(); }
+        catch (Exception ex) { Log.Debug("DNS", $"flushing the system resolver cache failed: {ex.Message}"); }
+    }
 }

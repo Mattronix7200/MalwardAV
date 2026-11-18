@@ -27,6 +27,8 @@ public sealed class NetworkService : IAsyncDisposable
     private AdBlockService? _adBlock;
 
     private Timer? _updateTimer;
+    private Timer? _exclusionTimer;
+    private DateTime _exclusionsStampUtc;
     private static readonly string UrlsVdebTarget = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "Malward", "data", "urls.vdeb");
@@ -52,7 +54,7 @@ public sealed class NetworkService : IAsyncDisposable
         _dnsMgr.ShieldEnabled = () => _config.Enabled && !_stopping;
         _dnsMgr.OnStandDown = () =>
         {
-            try { _dnsLeak.Remove(); } catch { }
+            if (DnsLeakGuard.RulesApplied()) { try { _dnsLeak.Remove(); } catch { } }
             try { _browserProxy.Restore(); } catch { }
             try { _quic.Remove(); } catch { }
             try { _httpFilter?.Stop(); } catch { }
@@ -69,7 +71,8 @@ public sealed class NetworkService : IAsyncDisposable
                 _ = Task.Run(async () => { try { await _dnsMgr.RecoverStaleAsync(); } catch { } });
             if (DohGuard.HasPendingSnapshot())
                 _ = Task.Run(() => { try { _doh.Restore(); } catch { } });
-            _ = Task.Run(() => { try { _dnsLeak.Remove(); } catch { } });
+            if (DnsLeakGuard.RulesApplied())
+                _ = Task.Run(() => { try { _dnsLeak.Remove(); } catch { } });
             if (QuicGuard.HasPendingMarker())
                 _ = Task.Run(() => { try { _quic.Remove(); } catch { } });
             if (BrowserProxyGuard.HasPendingSnapshot())
@@ -199,6 +202,10 @@ public sealed class NetworkService : IAsyncDisposable
 
         bool haveDb = _blocklist.DeferredMode ? _blocklist.HasDatabaseFile : _blocklist.IsLoaded;
         if (ProfileChangedSinceLastDownload()) haveDb = false;
+        try { _exclusionsStampUtc = File.GetLastWriteTimeUtc(NetworkConfig.DefaultPath); } catch { }
+        _exclusionTimer = new Timer(_ => ReloadExclusionsIfChanged(), null,
+                                    TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
+
         _updateTimer = new Timer(_ => SafeUpdateUrls(),
             state: null,
             dueTime: haveDb ? TimeSpan.FromMinutes(5) : TimeSpan.FromSeconds(15),
@@ -312,9 +319,39 @@ public sealed class NetworkService : IAsyncDisposable
         });
     }
 
+    private void ReloadExclusionsIfChanged()
+    {
+        if (_stopping) return;
+        try
+        {
+            var path = NetworkConfig.DefaultPath;
+            if (!File.Exists(path)) return;
+            var stamp = File.GetLastWriteTimeUtc(path);
+            if (stamp == _exclusionsStampUtc) return;
+            _exclusionsStampUtc = stamp;
+
+            var fresh = NetworkConfig.Load(path);
+            var now = fresh.Exclusions ?? new List<string>();
+            var before = _config.Exclusions ?? new List<string>();
+            if (now.Count == before.Count
+                && now.Zip(before).All(p => string.Equals(p.First, p.Second, StringComparison.OrdinalIgnoreCase)))
+                return;
+
+            _config.Exclusions = new List<string>(now);
+            DnsCache.Flush();
+            Log.Info("Config", $"Exclusion list reloaded without a restart ({now.Count} entries).");
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("Config", $"exclusion reload failed: {ex.Message}");
+        }
+    }
+
     public async Task StopAsync()
     {
         _stopping = true;
+        try { _exclusionTimer?.Dispose(); } catch { }
+        _exclusionTimer = null;
         try { _updateTimer?.Dispose(); } catch { }
         _updateTimer = null;
 
@@ -330,8 +367,9 @@ public sealed class NetworkService : IAsyncDisposable
             { Log.Error("Service", $"DoH policy restore failed: {ex.Message}"); }
         }
 
-        try { _dnsLeak.Remove(); } catch (Exception ex)
-        { Log.Error("Service", $"removing the foreign DNS block failed: {ex.Message}"); }
+        if (DnsLeakGuard.RulesApplied())
+            try { _dnsLeak.Remove(); } catch (Exception ex)
+            { Log.Error("Service", $"removing the foreign DNS block failed: {ex.Message}"); }
 
         if (!_config.Enabled || !_config.BlockQuic)
         {

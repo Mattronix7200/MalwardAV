@@ -15,6 +15,17 @@ public sealed class DnsLeakGuard
 
     public static bool RulesApplied() => File.Exists(MarkerPath);
 
+    private static bool AppliedFor(string? upstream)
+    {
+        try
+        {
+            return File.Exists(MarkerPath)
+                && string.Equals(File.ReadAllText(MarkerPath).Trim(), (upstream ?? "").Trim(),
+                                 StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
     public static uint ToNumber(string address)
     {
         var bytes = IPAddress.Parse(address).GetAddressBytes();
@@ -51,6 +62,9 @@ public sealed class DnsLeakGuard
 
     public void Apply(string? upstream)
     {
+        if (AppliedFor(upstream))
+            return;
+
         string ranges = RemoteRangesExcept(upstream);
         Remove();
 
@@ -107,7 +121,7 @@ public sealed class DnsLeakGuard
         }
         catch (Exception ex)
         {
-            Log.Warn("DnsLeak", $"netsh failed: {ex.Message}");
+            Log.Warn("DnsLeak", $"netsh failed: {ErrorText.English(ex)}");
             return false;
         }
     }

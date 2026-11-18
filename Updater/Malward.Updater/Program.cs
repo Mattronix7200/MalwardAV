@@ -348,6 +348,9 @@ internal static class Program
             if (!Directory.Exists(dir)) return true;
             if (CanWriteInto(dir)) return true;
 
+            dir = Path.GetFullPath(dir).TrimEnd('\\', '/');
+            if (dir.EndsWith(':')) dir += @"\.";
+
             // Wlasciciel ma WRITE_DAC niezaleznie od listy uprawnien, wiec przejecie wlasnosci
             // musi byc pierwsze - bez tego /reset nie ma prawa zmienic ACL.
             var kroki = new[]
@@ -423,12 +426,22 @@ internal static class Program
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             });
             if (p == null) return (-1, "failed to start icacls.exe");
-            string output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-            if (!p.WaitForExit(30000)) { try { p.Kill(); } catch { } return (-1, "icacls: timeout"); }
+            try { p.StandardInput.Close(); } catch { }
+            var stdout = p.StandardOutput.ReadToEndAsync();
+            var stderr = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(120_000))
+            {
+                try { p.Kill(entireProcessTree: true); } catch { }
+                return (-1, "icacls: no answer within 120 s — stopped");
+            }
+            Task.WaitAll(new Task[] { stdout, stderr }, 5000);
+            string output = (stdout.IsCompletedSuccessfully ? stdout.Result : "")
+                          + (stderr.IsCompletedSuccessfully ? stderr.Result : "");
             return (p.ExitCode, output);
         }
         catch (Exception ex) { return (-1, ex.Message); }

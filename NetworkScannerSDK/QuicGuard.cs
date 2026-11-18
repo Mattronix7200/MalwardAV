@@ -51,7 +51,7 @@ public sealed class QuicGuard
             if (code != 0 && !ignoreError && !string.IsNullOrWhiteSpace(err))
                 Log.Warn("Quic", $"netsh ({args}) -> {err.Trim()}");
         }
-        catch (Exception ex) { Log.Warn("Quic", $"netsh failed: {ex.Message}"); }
+        catch (Exception ex) { Log.Warn("Quic", $"netsh failed: {ErrorText.English(ex)}"); }
     }
 
     private static (int code, string err) Run(string args)

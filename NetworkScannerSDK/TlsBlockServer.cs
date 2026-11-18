@@ -116,6 +116,16 @@ public sealed class TlsBlockServer : IDisposable
             string host = sniHost ?? ExtractHostFromHeaders(headers) ?? "?";
             string path = ExtractRequestPath(headers);
 
+            {
+                int eol = headers.IndexOf("\r\n", StringComparison.Ordinal);
+                string requestLine = eol > 0 ? headers[..eol] : headers;
+                if (BlockPageAllow.TryHandle(requestLine, host, out var allowHtml))
+                {
+                    await BlockPageServer.WriteHtmlPublicAsync(ssl, allowHtml);
+                    return;
+                }
+            }
+
             string html;
             {
                 var (det, src) = _lookup(host);
@@ -138,7 +148,7 @@ public sealed class TlsBlockServer : IDisposable
                     await ssl.FlushAsync();
                     return;
                 }
-                html = BlockPageRenderer.Render(host, det, src);
+                html = BlockPageRenderer.Render(host, det, src, BlockPageAllow.Issue(host));
             }
             byte[] body = Encoding.UTF8.GetBytes(html);
 

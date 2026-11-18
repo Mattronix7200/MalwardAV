@@ -458,7 +458,13 @@ public sealed class SystemDnsManager : IDisposable
 
                 bool ok;
                 string how;
-                if (s.Dhcp || v4.Length == 0)
+                if (TrySetDnsNative(s.Id, s.Dhcp || v4.Length == 0 ? Array.Empty<string>() : v4, v6))
+                {
+                    ok = true;
+                    how = (s.Dhcp || v4.Length == 0 ? "automatic (DHCP)" : string.Join(",", v4))
+                          + (v6.Length > 0 ? " + IPv6 " + string.Join(",", v6) : "");
+                }
+                else if (s.Dhcp || v4.Length == 0)
                 {
                     ok = await RunPsAsync(ResetCommand(alias), ct);
                     how = "automatic (DHCP)";
@@ -473,6 +479,13 @@ public sealed class SystemDnsManager : IDisposable
                     var all = v4.Concat(v6).ToArray();
                     ok = await RunPsAsync(SetCommand(alias, all), ct);
                     how = string.Join(",", all);
+                }
+
+                if (!ok && WriteNameServersRegistry(s.Id,
+                        s.Dhcp || v4.Length == 0 ? Array.Empty<string>() : v4, v6))
+                {
+                    ok = true;
+                    how += " (written to the registry; takes effect after the next network restart or reboot)";
                 }
 
                 if (ok) { restored++; Log.Info("DnsMgr", $"DNS {alias} -> {how}"); }
@@ -707,6 +720,90 @@ public sealed class SystemDnsManager : IDisposable
                 DateTime.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
         }
         catch { }
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct DnsInterfaceSettings
+    {
+        public uint Version;
+        public ulong Flags;
+        public IntPtr Domain;
+        public IntPtr NameServer;
+        public IntPtr SearchList;
+        public uint RegistrationEnabled;
+        public uint RegisterAdapterName;
+        public uint EnableLlmnr;
+        public uint QueryAdapterName;
+        public IntPtr ProfileNameServer;
+    }
+
+    private const ulong DnsSettingIpv6 = 0x0001;
+    private const ulong DnsSettingNameServer = 0x0002;
+
+    [System.Runtime.InteropServices.DllImport("iphlpapi.dll", ExactSpelling = true)]
+    private static extern uint SetInterfaceDnsSettings(Guid interfaceGuid, ref DnsInterfaceSettings settings);
+
+    private static uint ApplyNameServers(Guid iface, bool ipv6, string servers)
+    {
+        var text = System.Runtime.InteropServices.Marshal.StringToHGlobalUni(servers);
+        try
+        {
+            var st = new DnsInterfaceSettings
+            {
+                Version = 1,
+                Flags = DnsSettingNameServer | (ipv6 ? DnsSettingIpv6 : 0),
+                NameServer = text,
+            };
+            return SetInterfaceDnsSettings(iface, ref st);
+        }
+        finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(text); }
+    }
+
+    private static bool TrySetDnsNative(string? ifaceId, string[] v4, string[] v6)
+    {
+        if (string.IsNullOrEmpty(ifaceId) || !Guid.TryParse(ifaceId, out var iface)) return false;
+        AnnounceOwnChange();
+        try
+        {
+            uint r4 = ApplyNameServers(iface, false, string.Join(",", v4));
+            uint r6 = ApplyNameServers(iface, true, string.Join(",", v6));
+            if (r4 != 0 || r6 != 0)
+            {
+                Log.Debug("DnsMgr", $"SetInterfaceDnsSettings returned {r4}/{r6} for {ifaceId}; falling back to PowerShell.");
+                return false;
+            }
+            return !HasStaticLoopbackNameServer(ifaceId);
+        }
+        catch (Exception ex) when (ex is EntryPointNotFoundException or DllNotFoundException)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("DnsMgr", $"SetInterfaceDnsSettings failed for {ifaceId}: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static bool WriteNameServersRegistry(string? ifaceId, string[] v4, string[] v6)
+    {
+        if (string.IsNullOrEmpty(ifaceId)) return false;
+        try
+        {
+            using (var k4 = Registry.LocalMachine.OpenSubKey(TcpipInterfacesKey + "\\" + ifaceId, writable: true))
+            {
+                if (k4 == null) return false;
+                k4.SetValue("NameServer", string.Join(",", v4), RegistryValueKind.String);
+            }
+            using (var k6 = Registry.LocalMachine.OpenSubKey(Tcpip6InterfacesKey + "\\" + ifaceId, writable: true))
+                k6?.SetValue("NameServer", string.Join(",", v6), RegistryValueKind.String);
+            return !HasStaticLoopbackNameServer(ifaceId);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("DnsMgr", $"Writing DNS servers to the registry failed for {ifaceId}: {ex.Message}");
+            return false;
+        }
     }
 
     private static async Task<bool> RunPsAsync(string command, CancellationToken ct)

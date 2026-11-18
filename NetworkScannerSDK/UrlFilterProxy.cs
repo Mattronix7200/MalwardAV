@@ -393,7 +393,7 @@ public sealed class UrlFilterProxy : IDisposable
         }
         catch (Exception ex)
         {
-            NoteHandshakeRefused(host, ex.Message);
+            NoteHandshakeRefused(host, ErrorText.English(ex));
             try { inner?.Dispose(); } catch { }
             try { outer.Dispose(); } catch { }
             try { upstream.Dispose(); } catch { }
@@ -535,6 +535,12 @@ public sealed class UrlFilterProxy : IDisposable
                                                       string? source, string firstLine,
                                                       string headers, CancellationToken ct)
     {
+        if (BlockPageAllow.TryHandle(firstLine, host, out var allowHtml))
+        {
+            await BlockPageServer.WriteHtmlPublicAsync(stream, allowHtml);
+            return;
+        }
+
         if (await AdStubResponse.TryWriteSubresourceAsync(stream, firstLine + "\n" + headers,
                                                           host, AdStubResponse.ThreatMarker, ct)) return;
 
@@ -550,7 +556,8 @@ public sealed class UrlFilterProxy : IDisposable
             return;
         }
 
-        var body = Encoding.UTF8.GetBytes(BlockPageRenderer.Render(host, detection, source));
+        var body = Encoding.UTF8.GetBytes(BlockPageRenderer.Render(host, detection, source,
+                                                                   BlockPageAllow.Issue(host)));
         await stream.WriteAsync(Encoding.ASCII.GetBytes(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
             + $"Content-Length: {body.Length}\r\n"
