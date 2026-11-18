@@ -54,11 +54,16 @@ public sealed class TrayService : ITray
 
     public Action<bool>? OnToggleRemovable { get; set; }
 
+    public Action<bool>? OnToggleBehavior { get; set; }
+
+    public Action? OnBeforeMenu { get; set; }
+
     private bool _protEnabled, _protAvailable, _protRunning;
     private bool _netEnabled,  _netAvailable,  _netRunning;
     private bool _backupAvailable, _backupOn;
     private bool _snapAvailable,   _snapOn;
     private bool _remAvailable,    _remOn;
+    private bool _behAvailable,    _behOn;
     private string _lastUpdateStr = "—";
     private string _versionStr    = "—";
     private string _dbVersionStr  = "—";
@@ -228,26 +233,63 @@ public sealed class TrayService : ITray
     public void SetProtectionState(bool available, bool enabled, bool running)
     {
         _protAvailable = available; _protEnabled = enabled; _protRunning = running;
+        SyncOpenMenu();
     }
 
     public void SetNetworkState(bool available, bool enabled, bool running)
     {
         _netAvailable = available; _netEnabled = enabled; _netRunning = running;
+        SyncOpenMenu();
     }
 
     public void SetBackupState(bool available, bool on)
     {
         _backupAvailable = available; _backupOn = on;
+        SyncOpenMenu();
     }
 
     public void SetSnapshotsState(bool available, bool on)
     {
         _snapAvailable = available; _snapOn = on;
+        SyncOpenMenu();
     }
 
     public void SetRemovableState(bool available, bool on)
     {
         _remAvailable = available; _remOn = on;
+        SyncOpenMenu();
+    }
+
+    public void SetBehaviorState(bool available, bool on)
+    {
+        _behAvailable = available; _behOn = on;
+        SyncOpenMenu();
+    }
+
+    private void SyncOpenMenu()
+    {
+        var f = _menuForm;
+        if (f == null || f.IsDisposed || !f.IsHandleCreated) return;
+        try
+        {
+            if (f.InvokeRequired) f.BeginInvoke(new Action(() => ApplyMenuState(f)));
+            else ApplyMenuState(f);
+        }
+        catch { }
+    }
+
+    private void ApplyMenuState(TrayMenuForm f)
+    {
+        if (f.IsDisposed) return;
+        f.SetStatus(
+            _protAvailable, _protEnabled, _protRunning,
+            _netAvailable,  _netEnabled,  _netRunning,
+            _lastUpdateStr, _versionStr, _dbVersionStr);
+        f.SetToggleStates(
+            _backupAvailable, _backupOn,
+            _snapAvailable,   _snapOn,
+            _remAvailable,    _remOn,
+            _behAvailable,    _behOn);
     }
 
     public void SetFooterInfo(string lastUpdate, string version, string dbVersion = "—")
@@ -363,6 +405,8 @@ public sealed class TrayService : ITray
         {
             if (_menuForm != null && !_menuForm.IsDisposed) { _menuForm.Close(); _menuForm = null; }
 
+            try { OnBeforeMenu?.Invoke(); } catch { }
+
             bool dark = false;
             try { dark = GetIsDarkTheme?.Invoke() ?? false; } catch { }
             if (GetIsDarkTheme == null)
@@ -388,14 +432,8 @@ public sealed class TrayService : ITray
             _menuForm.OnToggleBackup    = want => OnToggleBackup?.Invoke(want);
             _menuForm.OnToggleSnapshots = want => OnToggleSnapshots?.Invoke(want);
             _menuForm.OnToggleRemovable = want => OnToggleRemovable?.Invoke(want);
-            _menuForm.SetStatus(
-                _protAvailable, _protEnabled, _protRunning,
-                _netAvailable,  _netEnabled,  _netRunning,
-                _lastUpdateStr, _versionStr, _dbVersionStr);
-            _menuForm.SetToggleStates(
-                _backupAvailable, _backupOn,
-                _snapAvailable,   _snapOn,
-                _remAvailable,    _remOn);
+            _menuForm.OnToggleBehavior  = want => OnToggleBehavior?.Invoke(want);
+            ApplyMenuState(_menuForm);
             _menuForm.ShowAtCursor();
         }
         catch { }

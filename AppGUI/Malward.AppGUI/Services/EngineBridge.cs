@@ -33,6 +33,10 @@ public sealed class EngineBridge : IDisposable
                                   string? ArchiveDisplay = null);
 
     public sealed record ScanSkip(string Category, string Path, string Source, string Reason);
+
+    // Ustawienie systemu warte pokazania, ale NIE zagrozenie: skaner liczy je osobno od
+    // wykryc i nie podnosi nimi licznika infekcji.
+    public sealed record ScanSysSetting(string Id, string Location, string Description);
     public sealed record ScanSummary(
         long Encrypted, long Blocked, long Safe, long Cloud,
         long Threats, long System, long Skipped, long FilesTotal,
@@ -41,6 +45,7 @@ public sealed class EngineBridge : IDisposable
     public event Action<ScanProgress>? OnProgress;
     public event Action<ScanLine>? OnLine;
     public event Action<ScanSkip>? OnSkip;
+    public event Action<ScanSysSetting>? OnSysSetting;
     public event Action<ScanSummary>? OnDone;
     public event Action<string>? OnRawLine;
     public event Action<string>? OnError;
@@ -530,6 +535,8 @@ public sealed class EngineBridge : IDisposable
             if (p != null)
             {
                 try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+                try { p.WaitForExit(5000); } catch { }
+                Malward.Engine.Util.Paths.SweepWorkingDir();
             }
         }
         catch { }
@@ -582,12 +589,12 @@ public sealed class EngineBridge : IDisposable
                 foreach (var (token, phase, lo, hi) in phaseMap)
                 {
                     if (!line.Contains(token, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (line.Contains("aktualne", StringComparison.OrdinalIgnoreCase))
+                    if (line.Contains("up to date", StringComparison.OrdinalIgnoreCase))
                         emit(phase, "uptodate", hi, $"{HumanPhase(phase)} — aktualne.");
-                    else if (line.Contains("pobieram", StringComparison.OrdinalIgnoreCase) ||
-                             line.Contains("zmiana", StringComparison.OrdinalIgnoreCase))
+                    else if (line.Contains("downloading", StringComparison.OrdinalIgnoreCase) ||
+                             line.Contains("change detected", StringComparison.OrdinalIgnoreCase))
                         emit(phase, "busy", (lo + hi) / 2, $"Pobieram {HumanPhase(phase).ToLower()}…");
-                    else if (line.Contains("zaktualizowano", StringComparison.OrdinalIgnoreCase))
+                    else if (line.Contains("updated", StringComparison.OrdinalIgnoreCase))
                         emit(phase, "ok", hi, $"{HumanPhase(phase)} zaktualizowane.");
                     else if (line.Contains("failed", StringComparison.OrdinalIgnoreCase) ||
                              line.Contains("error", StringComparison.OrdinalIgnoreCase))
@@ -950,6 +957,16 @@ public sealed class EngineBridge : IDisposable
                 Error: null,
                 ArchiveEntry: string.IsNullOrEmpty(entry) ? null : entry,
                 ArchiveDisplay: string.IsNullOrEmpty(display) ? null : display));
+            return prevSummary;
+        }
+
+        if (line.StartsWith("SYSSETTING\t", StringComparison.Ordinal))
+        {
+            var fields = ParseTsv(line.AsSpan("SYSSETTING\t".Length));
+            OnSysSetting?.Invoke(new ScanSysSetting(
+                Id:          fields.GetValueOrDefault("id", ""),
+                Location:    fields.GetValueOrDefault("location", ""),
+                Description: fields.GetValueOrDefault("desc", "")));
             return prevSummary;
         }
 

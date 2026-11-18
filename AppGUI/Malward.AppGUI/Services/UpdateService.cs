@@ -99,6 +99,12 @@ public sealed class UpdateService
             form.Add(new StringContent(detection ?? "", Encoding.UTF8), "detection");
             form.Add(new StringContent(originalPath ?? "", Encoding.UTF8), "original_path");
             form.Add(new StringContent(productVersion ?? "", Encoding.UTF8), "product_version");
+            if (Malward.ResidentShield.QuarantineCrypto.TryHashPlain(quarantineBlobPath, out var fileSha, out var fileMd5, out var fileSize))
+            {
+                form.Add(new StringContent(fileSha, Encoding.ASCII), "file_sha256");
+                form.Add(new StringContent(fileMd5, Encoding.ASCII), "file_md5");
+                form.Add(new StringContent(fileSize.ToString(System.Globalization.CultureInfo.InvariantCulture), Encoding.ASCII), "file_size");
+            }
 
             using var zgloszenie = new HttpClient(Malward.Engine.Cloud.CertPinning.Handler(_certPin, Log))
             {
@@ -124,6 +130,41 @@ public sealed class UpdateService
         {
             if (tmpZip != null) { try { File.Delete(tmpZip); } catch { } }
         }
+    }
+
+    public async Task<ReportResult> ReportFalsePositiveUrlAsync(
+        string url, string detection, string comment, string productVersion, CancellationToken ct = default)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(url))
+                return new ReportResult(false, null, "Podaj adres URL.");
+
+            await EnsureAuthAsync(ct);
+
+            using var form = new MultipartFormDataContent
+            {
+                { new StringContent(url.Trim(), Encoding.UTF8), "url" },
+                { new StringContent(comment ?? "", Encoding.UTF8), "comment" },
+                { new StringContent(detection ?? "", Encoding.UTF8), "detection" },
+                { new StringContent(productVersion ?? "", Encoding.UTF8), "product_version" },
+            };
+
+            using var req = new HttpRequestMessage(HttpMethod.Post, "report/false-positive-url") { Content = form };
+            req.Headers.Authorization = _http.DefaultRequestHeaders.Authorization;
+            using var resp = await _http.SendAsync(req, ct);
+            if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+                return new ReportResult(false, null, "Serwer nie obsługuje zgłoszeń adresów (wymaga nowszej wersji).");
+            if (!resp.IsSuccessStatusCode)
+                return new ReportResult(false, null, $"Serwer odrzucił zgłoszenie ({(int)resp.StatusCode}).");
+
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            string? id = null;
+            try { id = JsonNode.Parse(body)?["id"]?.GetValue<string>(); } catch { }
+            return new ReportResult(true, id, null);
+        }
+        catch (OperationCanceledException) { return new ReportResult(false, null, "Anulowano."); }
+        catch (Exception ex) { return new ReportResult(false, null, ex.Message); }
     }
 
     public async Task<DownloadResult> DownloadBundleAsync(string destZip, Action<ProgressEvent> progress,

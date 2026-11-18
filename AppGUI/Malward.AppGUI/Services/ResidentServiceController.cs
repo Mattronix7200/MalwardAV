@@ -171,7 +171,10 @@ public sealed class ResidentServiceController
 
     public static bool ModuleEnabled() => ReadFlag("resident_shield_enabled", true);
 
-    public static bool OtherModulesWanted() => ReadFlag("network_shield_enabled", true) || BackupEnabled();
+    public static bool BehaviorWanted() => ReadFlag("behavior_monitor", true);
+
+    public static bool OtherModulesWanted() => ReadFlag("network_shield_enabled", true) || BackupEnabled()
+                                              || BehaviorWanted();
 
     private static string BackupConfigPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),

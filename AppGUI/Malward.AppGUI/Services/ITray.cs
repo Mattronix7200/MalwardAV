@@ -20,6 +20,8 @@ public interface ITray : IDisposable
     Action<bool>? OnToggleBackup { get; set; }
     Action<bool>? OnToggleSnapshots { get; set; }
     Action<bool>? OnToggleRemovable { get; set; }
+    Action<bool>? OnToggleBehavior { get; set; }
+    Action? OnBeforeMenu { get; set; }
     Func<bool>? GetIsDarkTheme { get; set; }
 
     Action? RestoreOverride { get; set; }
@@ -39,6 +41,7 @@ public interface ITray : IDisposable
     void SetBackupState(bool available, bool on);
     void SetSnapshotsState(bool available, bool on);
     void SetRemovableState(bool available, bool on);
+    void SetBehaviorState(bool available, bool on);
     void SetFooterInfo(string lastUpdate, string version, string dbVersion = "—");
     void SetHealthOverlay(HealthBadge kind);
 }

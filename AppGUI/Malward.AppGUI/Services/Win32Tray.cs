@@ -139,6 +139,8 @@ public sealed class Win32Tray : ITray
     public Action<bool>? OnToggleBackup { get; set; }
     public Action<bool>? OnToggleSnapshots { get; set; }
     public Action<bool>? OnToggleRemovable { get; set; }
+    public Action<bool>? OnToggleBehavior { get; set; }
+    public Action? OnBeforeMenu { get; set; }
     public Func<bool>? GetIsDarkTheme { get; set; }
 
     public Action? RestoreOverride { get; set; }
@@ -314,6 +316,7 @@ public sealed class Win32Tray : ITray
     public void SetBackupState(bool available, bool on) { }
     public void SetSnapshotsState(bool available, bool on) { }
     public void SetRemovableState(bool available, bool on) { }
+    public void SetBehaviorState(bool available, bool on) { }
     public void SetFooterInfo(string lastUpdate, string version, string dbVersion = "—") { }
     public void SetHealthOverlay(HealthBadge kind) { }
 

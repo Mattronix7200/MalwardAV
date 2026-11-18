@@ -141,7 +141,7 @@ public partial class AppHost
         }
         catch (Exception ex)
         {
-            PostToJs("toast", new { level = "err", msg = $"Nie udało się anulować skanowania: {ex.Message}" });
+            PostToJs("toast", new { level = "err", msg = Loc.F("Nie udało się anulować skanowania: {0}", ex.Message) });
             return;
         }
 

@@ -16,7 +16,9 @@ public sealed record GuiSettings(
     [property: JsonPropertyName("autostart")]     bool? Autostart = null,
     [property: JsonPropertyName("context_menu")]  bool? ContextMenu = null,
 
-    [property: JsonPropertyName("gui_mode")]      string GuiMode = "window");
+    [property: JsonPropertyName("gui_mode")]      string GuiMode = "window",
+
+    [property: JsonPropertyName("show_analyze_tool")] bool ShowAnalyzeTool = false);
 
 public sealed class GuiSettingsStore
 {

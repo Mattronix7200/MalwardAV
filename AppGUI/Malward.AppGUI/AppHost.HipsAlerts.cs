@@ -163,7 +163,7 @@ public partial class AppHost
         {
             if (string.IsNullOrWhiteSpace(a.Where) || string.IsNullOrWhiteSpace(a.Rule))
             {
-                PostToJs("toast", new { level = "warn", msg = "Nie ma czego dodać do wyjątków — zdarzenie nie wskazuje obiektu." });
+                PostToJs("toast", new { level = "warn", msg = Loc.T("Nie ma czego dodać do wyjątków — zdarzenie nie wskazuje obiektu.") });
                 return;
             }
 
@@ -191,11 +191,11 @@ public partial class AppHost
             File.WriteAllText(path, root.ToJsonString());
 
             _hipsAlerts?.Mute(a.Rule, a.Where);
-            PostToJs("toast", new { level = "ok", msg = $"Dodano do wyjątków: {a.Where}" });
+            PostToJs("toast", new { level = "ok", msg = Loc.F("Dodano do wyjątków: {0}", a.Where) });
         }
         catch (Exception exx)
         {
-            PostToJs("toast", new { level = "warn", msg = $"Nie udało się dodać wyjątku: {exx.Message}" });
+            PostToJs("toast", new { level = "warn", msg = Loc.F("Nie udało się dodać wyjątku: {0}", exx.Message) });
         }
     }
 

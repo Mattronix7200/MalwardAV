@@ -22,6 +22,7 @@ public sealed class TrayMenuForm : Form
     public Action<bool>? OnToggleBackup;
     public Action<bool>? OnToggleSnapshots;
     public Action<bool>? OnToggleRemovable;
+    public Action<bool>? OnToggleBehavior;
 
     private readonly Image? _logoImage;
     private readonly IReadOnlyDictionary<string, Image>? _icons;
@@ -31,6 +32,7 @@ public sealed class TrayMenuForm : Form
     private bool _backupAvailable,  _backupOn;
     private bool _snapshotsAvailable, _snapshotsOn;
     private bool _removableAvailable,  _removableOn;
+    private bool _behaviorAvailable,   _behaviorOn;
     private string _lastUpdate = "—";
     private string _version    = "—";
     private string _dbVersion  = "—";
@@ -39,7 +41,7 @@ public sealed class TrayMenuForm : Form
     private static readonly Color CheckBlue = Color.FromArgb(0x3A, 0xA0, 0xFF);
 
     private Label _footerLbl = null!;
-    private CheckRow _residentSwitch = null!, _networkSwitch = null!;
+    private CheckRow _residentSwitch = null!, _behaviorSwitch = null!, _networkSwitch = null!;
     private CheckRow _backupSwitch = null!, _snapshotsSwitch = null!, _removableSwitch = null!;
 
     private FlyoutForm? _scanFlyout, _protFlyout;
@@ -203,6 +205,7 @@ public sealed class TrayMenuForm : Form
         _protFlyout = NewFlyout(286);
         int y = 8;
         _residentSwitch  = AddCheckRow(_protFlyout, y, Loc.T("Ochrona rezydentna"), on => OnToggleResident?.Invoke(on));  y += 38;
+        _behaviorSwitch  = AddCheckRow(_protFlyout, y, Loc.T("Osłona behawioralna"), on => OnToggleBehavior?.Invoke(on)); y += 38;
         _networkSwitch   = AddCheckRow(_protFlyout, y, Loc.T("Osłona sieciowa"),    on => OnToggleNetwork?.Invoke(on));   y += 38;
         _backupSwitch    = AddCheckRow(_protFlyout, y, Loc.T("Kopia zapasowa"),     on => OnToggleBackup?.Invoke(on));    y += 38;
         _snapshotsSwitch = AddCheckRow(_protFlyout, y, Loc.T("Migawki plików"),     on => OnToggleSnapshots?.Invoke(on)); y += 38;
@@ -321,8 +324,10 @@ public sealed class TrayMenuForm : Form
     public void SetToggleStates(
         bool backupAvailable, bool backupOn,
         bool snapshotsAvailable, bool snapshotsOn,
-        bool removableAvailable, bool removableOn)
+        bool removableAvailable, bool removableOn,
+        bool behaviorAvailable, bool behaviorOn)
     {
+        _behaviorAvailable = behaviorAvailable;   _behaviorOn = behaviorOn;
         _backupAvailable = backupAvailable;       _backupOn = backupOn;
         _snapshotsAvailable = snapshotsAvailable; _snapshotsOn = snapshotsOn;
         _removableAvailable = removableAvailable; _removableOn = removableOn;
@@ -342,6 +347,8 @@ public sealed class TrayMenuForm : Form
         _backupSwitch.SetCheckedSilent(_backupAvailable && _backupOn);
         _snapshotsSwitch.SetCheckedSilent(_snapshotsAvailable && _snapshotsOn);
         _removableSwitch.SetCheckedSilent(_removableAvailable && _removableOn);
+        _behaviorSwitch.Enabled = _behaviorAvailable;
+        _behaviorSwitch.SetCheckedSilent(_behaviorAvailable && _behaviorOn);
 
         _footerLbl.Text = Loc.F("Ostatnia aktualizacja baz: {0}\nBaza wirusów: {1}\nWersja: {2}",
             _lastUpdate, _dbVersion, _version);

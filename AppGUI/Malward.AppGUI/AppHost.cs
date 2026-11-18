@@ -244,6 +244,8 @@ public partial class AppHost
                 PushProtectionStatus();
                 PostToJs("backup.status.refresh", new { });
             });
+            _tray.OnBeforeMenu = PushProtectionStatus;
+            _tray.OnToggleBehavior = want => Ui.Send(() => SetBehaviorMonitorFromTray(want));
             _tray.OnToggleRemovable = want => Ui.Send(() =>
             {
                 try { _residentSettings?.Merge(new JsonObject { ["scan_removable"] = want }); } catch { }
@@ -696,6 +698,16 @@ public partial class AppHost
             });
         };
 
+        _engine.OnSysSetting += s =>
+        {
+            PostToJs("scan.syssetting", new
+            {
+                id = s.Id,
+                location = s.Location,
+                desc = s.Description
+            });
+        };
+
         _engine.OnSkip += s =>
         {
             if (s.Category is "system" or "skipped") return;
@@ -903,7 +915,7 @@ public partial class AppHost
         }
 
         var gs = _guiSettings?.Read() ?? new GuiSettings();
-        PostToJs("gui.settings.data", new { theme = gs.Theme, lang = gs.Lang, autoUpdateEnabled = gs.AutoUpdateEnabled, autoUpdateMinutes = gs.AutoUpdateMinutes, lastUpdateCheckUnix = gs.LastUpdateCheckUnix, guiMode = gs.GuiMode, webUiUrl = WebUiUrl });
+        PostToJs("gui.settings.data", new { theme = gs.Theme, lang = gs.Lang, autoUpdateEnabled = gs.AutoUpdateEnabled, autoUpdateMinutes = gs.AutoUpdateMinutes, lastUpdateCheckUnix = gs.LastUpdateCheckUnix, guiMode = gs.GuiMode, showAnalyzeTool = gs.ShowAnalyzeTool, webUiUrl = WebUiUrl });
 
         try
         {
@@ -1689,6 +1701,28 @@ public partial class AppHost
                     });
                     break;
                 }
+            case "engine.url.report":
+                {
+                    var url     = data["url"]?.GetValue<string>() ?? "";
+                    var comment = data["comment"]?.GetValue<string>() ?? "";
+                    var det     = data["detection"]?.GetValue<string>() ?? "";
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            var us = new UpdateService(_settings?.Read(), _engineDir!, _scannerEdition);
+                            var ver = System.Reflection.Assembly.GetExecutingAssembly()
+                                          .GetName().Version?.ToString() ?? "";
+                            var r = await us.ReportFalsePositiveUrlAsync(url, det, comment, ver);
+                            PostToJs("quarantine.report.result", new { ok = r.Ok, id = r.Id, error = r.Error });
+                        }
+                        catch (Exception ex)
+                        {
+                            PostToJs("quarantine.report.result", new { ok = false, error = ex.Message });
+                        }
+                    });
+                    break;
+                }
             case "engine.quarantine.restoreMany":
                 {
                     if (_engine == null) return;
@@ -1954,7 +1988,7 @@ public partial class AppHost
                     }
                     PostToJs("gui.settings.data", new { theme = gs.Theme, lang = gs.Lang, autoUpdateEnabled = gs.AutoUpdateEnabled, autoUpdateMinutes = gs.AutoUpdateMinutes, lastUpdateCheckUnix = gs.LastUpdateCheckUnix, activeProfile = gs.ActiveProfile,
                         autostart = gs.Autostart, contextMenu = gs.ContextMenu,
-                        guiMode = gs.GuiMode, webUiUrl = WebUiUrl });
+                        guiMode = gs.GuiMode, showAnalyzeTool = gs.ShowAnalyzeTool, webUiUrl = WebUiUrl });
                     break;
                 }
             case "gui.settings.write":
@@ -1979,7 +2013,10 @@ public partial class AppHost
                         _guiSettings?.Write(new GuiSettings(theme, lang, auto, mins, last, prof,
                             Autostart: data.ContainsKey("autostart") ? data["autostart"]?.GetValue<bool?>() : existing.Autostart,
                             ContextMenu: data.ContainsKey("contextMenu") ? data["contextMenu"]?.GetValue<bool?>() : existing.ContextMenu,
-                            GuiMode: trybGui));
+                            GuiMode: trybGui,
+                            ShowAnalyzeTool: data.ContainsKey("showAnalyzeTool")
+                                ? data["showAnalyzeTool"]?.GetValue<bool>() ?? false
+                                : existing.ShowAnalyzeTool));
 
                         if (!string.Equals(prof, existing.ActiveProfile, StringComparison.Ordinal))
                             CrashLog.Write("profile", null,
@@ -2104,8 +2141,13 @@ public partial class AppHost
                             }
                         }
 
-                        _ = Task.Run(() =>
+                        bool behaviorTurnedOn = BehaviorTurnedOn(payload);
+                        _ = Task.Run(async () =>
                         {
+                            if (behaviorTurnedOn && _resident != null && !_resident.IsRunning())
+                            {
+                                try { await _resident.EnsureHostRunningAsync(); } catch { }
+                            }
                             bool restarted = _resident != null && _resident.State() == "running";
                             Ui.Send(() =>
                             {
@@ -2131,7 +2173,7 @@ public partial class AppHost
                         var (ok, err) = await _network.EnableAsync();
                         Ui.Send(() =>
                         {
-                            if (!ok) PostToJs("toast", new { level = "error", msg = $"Osłona sieciowa: {err}" });
+                            if (!ok) PostToJs("toast", new { level = "error", msg = Loc.F("Osłona sieciowa: {0}", err) });
                             PushProtectionStatus();
                         });
                     });
@@ -2147,7 +2189,7 @@ public partial class AppHost
                         var (ok, err) = await _network.DisableAsync();
                         Ui.Send(() =>
                         {
-                            if (!ok) PostToJs("toast", new { level = "error", msg = $"Osłona sieciowa: {err}" });
+                            if (!ok) PostToJs("toast", new { level = "error", msg = Loc.F("Osłona sieciowa: {0}", err) });
                             PushProtectionStatus();
                         });
                     });
@@ -2699,7 +2741,7 @@ public partial class AppHost
                             if (File.Exists(ev))
                             {
                                 var all = File.ReadAllLines(ev);
-                                var take = Math.Min(80, all.Length);
+                                var take = Math.Min(300, all.Length);
                                 var recent = new string[take];
                                 for (int i = 0; i < take; i++) recent[i] = all[all.Length - 1 - i];
                                 events = string.Join('\n', recent);
@@ -2721,7 +2763,18 @@ public partial class AppHost
                                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                                 "Malward", "data");
                             Directory.CreateDirectory(dir);
-                            File.WriteAllText(Path.Combine(dir, "hips-rules.json"), payload);
+                            var file = Path.Combine(dir, "hips-rules.json");
+                            JsonObject merged;
+                            try
+                            {
+                                merged = (File.Exists(file) ? JsonNode.Parse(File.ReadAllText(file)) as JsonObject : null)
+                                         ?? new JsonObject();
+                            }
+                            catch { merged = new JsonObject(); }
+                            if (JsonNode.Parse(payload) is JsonObject incoming)
+                                foreach (var kv in incoming.ToList())
+                                    merged[kv.Key] = kv.Value?.DeepClone();
+                            File.WriteAllText(file, merged.ToJsonString());
 
                             PostToJs("hips.saved", new { ok = true });
                         }
@@ -2775,7 +2828,7 @@ public partial class AppHost
                 {
                     string loc = data?["location"]?.GetValue<string>() ?? "";
                     try { RevealLocation(loc); }
-                    catch (Exception ex) { PostToJs("toast", new { level = "warn", msg = $"Nie udało się otworzyć: {ex.Message}" }); }
+                    catch (Exception ex) { PostToJs("toast", new { level = "warn", msg = Loc.F("Nie udało się otworzyć: {0}", ex.Message) }); }
                     break;
                 }
             case "app.autostart.read":
@@ -2961,7 +3014,7 @@ public partial class AppHost
                     {
                         using var p = System.Diagnostics.Process.GetProcessById(pid);
                         p.Kill(entireProcessTree: true);
-                        PostToJs("toast", new { level = "info", msg = $"Zakończono PID {pid}." });
+                        PostToJs("toast", new { level = "info", msg = Loc.F("Zakończono PID {0}.", pid) });
                     }
                     catch (Exception ex) { PostToJs("toast", new { level = "error", msg = $"Kill: {ex.Message}" }); }
                     break;
@@ -2973,7 +3026,7 @@ public partial class AppHost
                     if (string.IsNullOrEmpty(path)) { PostToJs("toast", new { level = "error", msg = "Brak ścieżki procesu." }); break; }
                     var rule = $"Malward block: {System.IO.Path.GetFileName(path)}";
                     var (ok, err) = Malward.FWManager.FirewallRules.BlockProgram(path, rule);
-                    PostToJs("toast", new { level = ok ? "info" : "error", msg = ok ? $"Zablokowano {Path.GetFileName(path)}." : $"Błąd: {err}" });
+                    PostToJs("toast", new { level = ok ? "info" : "error", msg = ok ? Loc.F("Zablokowano {0}.", Path.GetFileName(path)) : Loc.F("Błąd: {0}", err) });
                     break;
                 }
             case "firewall.rules.list":
@@ -3006,7 +3059,7 @@ public partial class AppHost
                     string name = data["name"]?.GetValue<string>() ?? "";
                     if (string.IsNullOrEmpty(name)) { PostToJs("toast", new { level = "error", msg = "Brak nazwy reguły." }); break; }
                     var (ok, err) = Malward.FWManager.FirewallRules.Remove(name);
-                    PostToJs("toast", new { level = ok ? "info" : "error", msg = ok ? "Usunięto regułę." : $"Błąd: {err}" });
+                    PostToJs("toast", new { level = ok ? "info" : "error", msg = ok ? Loc.T("Usunięto regułę.") : Loc.F("Błąd: {0}", err) });
                     break;
                 }
             case "firewall.profile.get":
@@ -3032,7 +3085,7 @@ public partial class AppHost
                     };
                     if (code == 0) { PostToJs("toast", new { level = "error", msg = "Nieznany profil." }); break; }
                     var (ok, err) = Malward.FWManager.FirewallProfile.SetProfileEnabled(code, enabled);
-                    PostToJs("toast", new { level = ok ? "info" : "error", msg = ok ? "Profil zaktualizowany." : $"Błąd: {err}" });
+                    PostToJs("toast", new { level = ok ? "info" : "error", msg = ok ? Loc.T("Profil zaktualizowany.") : Loc.F("Błąd: {0}", err) });
                     break;
                 }
             case "firewall.power.read":
@@ -3153,7 +3206,7 @@ public partial class AppHost
             case "firewall.rules.deleteAllMalward":
                 {
                     int n = Malward.FWManager.FirewallRules.DeleteAllMalwardPrefixed();
-                    PostToJs("toast", new { level = "info", msg = $"Usunięto {n} reguł Malward." });
+                    PostToJs("toast", new { level = "info", msg = Loc.F("Usunięto {0} reguł Malward.", n) });
                     break;
                 }
             case "firewall.lolbins.import":
@@ -3183,9 +3236,9 @@ public partial class AppHost
                         { PostToJs("toast", new { level = "error", msg = "Brak folderu." }); break; }
                         var (created, err) = Malward.FWManager.FirewallRules.BlockOrAllowFolder(folder, name, allow, dir);
                         if (created == 0)
-                            PostToJs("toast", new { level = "error", msg = $"Brak .exe w folderze. {err}" });
+                            PostToJs("toast", new { level = "error", msg = Loc.F("Brak plików .exe w folderze. {0}", err) });
                         else
-                            PostToJs("toast", new { level = "info", msg = $"Folder rule: dodano {created} reguł." });
+                            PostToJs("toast", new { level = "info", msg = Loc.F("Reguła folderu: dodano {0} reguł.", created) });
                     }
                     catch (Exception ex) { PostToJs("toast", new { level = "error", msg = ex.Message }); }
                     break;
@@ -3214,7 +3267,7 @@ public partial class AppHost
                         if (!ok) PostToJs("toast", new { level = "error", msg = $"Allow: {err}" });
                         else
                         {
-                            PostToJs("toast", new { level = "info", msg = $"Zezwolono: {System.IO.Path.GetFileName(path)}" });
+                            PostToJs("toast", new { level = "info", msg = Loc.F("Zezwolono: {0}", System.IO.Path.GetFileName(path)) });
                             _fwListener?.Snooze(path, dir, TimeSpan.FromSeconds(15));
                             _fwListener?.MarkAppDecided(path);
                         }
@@ -3236,7 +3289,7 @@ public partial class AppHost
                         if (!ok) PostToJs("toast", new { level = "error", msg = $"Block: {err}" });
                         else
                         {
-                            PostToJs("toast", new { level = "info", msg = $"Zablokowano: {System.IO.Path.GetFileName(path)}" });
+                            PostToJs("toast", new { level = "info", msg = Loc.F("Zablokowano: {0}", System.IO.Path.GetFileName(path)) });
 
                             _fwListener?.Snooze(path, dir, TimeSpan.FromSeconds(15));
                             _fwListener?.MarkAppDecided(path);
@@ -3268,7 +3321,7 @@ public partial class AppHost
                         if (!ok) PostToJs("toast", new { level = "error", msg = $"Allow Temp: {err}" });
                         else
                         {
-                            PostToJs("toast", new { level = "info", msg = $"Tymczasowa zgoda na {minutes} min: {System.IO.Path.GetFileName(path)}" });
+                            PostToJs("toast", new { level = "info", msg = Loc.F("Tymczasowa zgoda na {0} min: {1}", minutes, System.IO.Path.GetFileName(path)) });
                             _fwListener?.Snooze(path, dir, TimeSpan.FromMinutes(minutes));
                         }
                     }
@@ -3289,9 +3342,9 @@ public partial class AppHost
                         string baseName = (allow ? "Malward Allow folder" : "Malward Block folder") + " — " + System.IO.Path.GetFileName(folder);
                         var (created, err) = Malward.FWManager.FirewallRules.BlockOrAllowFolder(folder, baseName, allow, 2);
                         if (created == 0)
-                            PostToJs("toast", new { level = "error", msg = $"Wildcard: 0 reguł. {err}" });
+                            PostToJs("toast", new { level = "error", msg = Loc.F("Reguła z symbolem wieloznacznym: 0 reguł. {0}", err) });
                         else
-                            PostToJs("toast", new { level = "info", msg = $"Wildcard ({(allow ? "Allow" : "Block")}): dodano {created} reguł." });
+                            PostToJs("toast", new { level = "info", msg = Loc.F(allow ? "Reguła zezwalająca z symbolem wieloznacznym: dodano {0} reguł." : "Reguła blokująca z symbolem wieloznacznym: dodano {0} reguł.", created) });
                         _fwListener?.Snooze(path, "OUT", TimeSpan.FromSeconds(20));
                     }
                     catch (Exception ex) { PostToJs("toast", new { level = "error", msg = ex.Message }); }
@@ -4539,7 +4592,7 @@ public partial class AppHost
             Process.Start(new ProcessStartInfo("shutdown.exe", "/r /t 8 /c \"Malward: restart po usunięciu zagrożeń\"")
             { UseShellExecute = false, CreateNoWindow = true });
         }
-        catch (Exception ex) { PostToJs("toast", new { level = "err", msg = $"Nie udało się zrestartować: {ex.Message}" }); }
+        catch (Exception ex) { PostToJs("toast", new { level = "err", msg = Loc.F("Nie udało się zrestartować: {0}", ex.Message) }); }
     }
 
     private bool ResidentNotificationsOn()
@@ -4868,7 +4921,7 @@ public partial class AppHost
             });
             if (ok) _fwListener?.Snooze(path, dir, TimeSpan.FromSeconds(15));
             PostToJs("toast", new { level = ok ? "info" : "error",
-                msg = ok ? $"Zezwolono: {System.IO.Path.GetFileName(path)}" : $"Allow: {err}" });
+                msg = ok ? Loc.F("Zezwolono: {0}", System.IO.Path.GetFileName(path)) : $"Allow: {err}" });
         }
         catch { }
     }
@@ -5776,6 +5829,27 @@ public partial class AppHost
         });
     }
 
+    private void SetBehaviorMonitorFromTray(bool want)
+    {
+        if (_residentSettings == null || _resident == null) { PushProtectionStatus(); return; }
+        try { _residentSettings.Merge(new JsonObject { ["behavior_monitor"] = want }); } catch { }
+        PostToJs("resident.behavior.state", new { enabled = want });
+        _ = Task.Run(async () =>
+        {
+            if (want && !_resident.IsRunning())
+            {
+                try { await _resident.EnsureHostRunningAsync(); } catch { }
+            }
+            Ui.Send(PushProtectionStatus);
+        });
+    }
+
+    private static bool BehaviorTurnedOn(JsonNode? payload)
+    {
+        try { return payload?["behavior_monitor"]?.GetValue<bool>() == true; }
+        catch { return false; }
+    }
+
     private void PushProtectionStatus()
     {
         string state = _resident?.State() ?? "unavailable";
@@ -5785,13 +5859,18 @@ public partial class AppHost
             state = "running";
         bool available = _resident != null;
         bool running = state == "running";
+        bool behavior = available && (_resident?.IsRunning() ?? false)
+                        && ResidentServiceController.BehaviorWanted()
+                        && ResidentServiceController.ModuleRunning("behavior");
         PostToJs("protection.status", new
         {
             available,
             state,
             enabled = wanted,
+            behavior,
         });
         try { _tray?.SetProtectionState(available, wanted, running); } catch { }
+        try { _tray?.SetBehaviorState(available, ResidentServiceController.BehaviorWanted()); } catch { }
 
         string nState = _network?.State() ?? "unavailable";
         bool nAvail = _network != null;
@@ -6261,8 +6340,10 @@ public partial class AppHost
                 bool auto    = g["auto_update_enabled"]?.GetValue<bool>() ?? cur.AutoUpdateEnabled;
                 int mins     = g["auto_update_minutes"]?.GetValue<int>() ?? cur.AutoUpdateMinutes;
 
-                _guiSettings?.Write(new GuiSettings(theme, lang, auto, mins, cur.LastUpdateCheckUnix,
-                                                    cur.ActiveProfile));
+                _guiSettings?.Write(cur with
+                {
+                    Theme = theme, Lang = lang, AutoUpdateEnabled = auto, AutoUpdateMinutes = mins,
+                });
             }
             catch { }
         }
@@ -6273,11 +6354,14 @@ public partial class AppHost
         try
         {
             var path = Path.Combine(_appDataDir, "data", "hips-rules.json");
-            JsonNode? exceptions = null;
+            JsonNode? exceptions = null, learned = null;
             try
             {
                 if (File.Exists(path) && JsonNode.Parse(File.ReadAllText(path)) is JsonObject cur)
+                {
                     exceptions = cur["exceptions"]?.DeepClone();
+                    learned = cur["learned"]?.DeepClone();
+                }
             }
             catch { }
             var o = new JsonObject
@@ -6285,7 +6369,9 @@ public partial class AppHost
                 ["enabled"] = hp["enabled"]?.GetValue<bool>() ?? true,
                 ["tier"]    = hp["tier"]?.GetValue<string>() ?? "medium",
             };
+            if (hp["level"]?.GetValue<string>() is string level && level.Length > 0) o["level"] = level;
             if (exceptions != null) o["exceptions"] = exceptions;
+            if (learned != null) o["learned"] = learned;
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, o.ToJsonString());
         }
@@ -6420,8 +6506,10 @@ public partial class AppHost
             {
                 var cur = _guiSettings?.Read() ?? new GuiSettings();
 
-                _guiSettings?.Write(new GuiSettings("auto", cur.Lang, true, 360, cur.LastUpdateCheckUnix,
-                                                    "medium", cur.Autostart, cur.ContextMenu));
+                _guiSettings?.Write(cur with
+                {
+                    Theme = "auto", AutoUpdateEnabled = true, AutoUpdateMinutes = 360, ActiveProfile = "medium",
+                });
             }
             catch { }
             _ = ReloadModulesAfterSettingsChangeAsync();
@@ -6435,7 +6523,8 @@ public partial class AppHost
         _reconfiguringModules = true;
         try
         {
-            if (_resident != null && !_resident.IsRunning() && ResidentServiceController.ModuleEnabled())
+            if (_resident != null && !_resident.IsRunning()
+                && (ResidentServiceController.ModuleEnabled() || ResidentServiceController.BehaviorWanted()))
             {
                 try { await _resident.EnsureHostRunningAsync(); } catch { }
             }
