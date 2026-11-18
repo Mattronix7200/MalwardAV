@@ -177,11 +177,7 @@ public sealed class ArchiveScanner
 
         entries = entries.Where(e => !LooksLikePeMember(e.Path)).ToList();
 
-        var workRoot = Paths.WorkingDir;
-        try { Directory.CreateDirectory(workRoot); }
-        catch { workRoot = Path.GetTempPath(); }
-        var workDir = Path.Combine(workRoot, $"arch-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(workDir);
+        var workDir = Paths.NewWorkDir("arch");
 
         var findings = new List<ArchiveEntryFinding>();
         string archiveName = displayName ?? Path.GetFileName(archivePath);
@@ -401,11 +397,7 @@ public sealed class ArchiveScanner
             return new ArchiveResult(false, Array.Empty<ArchiveEntryFinding>(),
                 "Archive is encrypted", PasswordProtected: true);
 
-        var workRoot = Paths.WorkingDir;
-        try { Directory.CreateDirectory(workRoot); }
-        catch { workRoot = Path.GetTempPath(); }
-        var workDir = Path.Combine(workRoot, $"arch-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(workDir);
+        var workDir = Paths.NewWorkDir("arch");
 
         var findings = new List<ArchiveEntryFinding>();
         string archiveName = displayName ?? Path.GetFileName(archivePath);
@@ -479,10 +471,7 @@ public sealed class ArchiveScanner
         var sevenZip = _sevenZip ?? Paths.SevenZipExe;
         if (!File.Exists(sevenZip)) return false;
 
-        var workRoot = Paths.WorkingDir;
-        try { Directory.CreateDirectory(workRoot); } catch { workRoot = Path.GetTempPath(); }
-        var workDir = Path.Combine(workRoot, $"fix-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(workDir);
+        var workDir = Paths.NewWorkDir("fix");
         try
         {
             var ex = ExtractOne(sevenZip, archivePath, workDir, chain[0], timeoutSec);

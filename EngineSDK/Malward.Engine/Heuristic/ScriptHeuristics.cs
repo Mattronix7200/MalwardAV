@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using Malward.Engine.Util;
 
 namespace Malward.Engine.Heuristic;
@@ -116,17 +116,17 @@ public static class ScriptHeuristics
                        || Any(t, "certutil -urlcache", "bitsadmin /transfer", "invoke-webrequest",
                                  "downloadfile", "downloadstring", "start-bitstransfer");
         bool toDisk = Any(t, "savetofile", "adodb.stream", "downloadfile", "-outfile", "curl -o", "wget ");
-        if (httpObject && toDisk) Mark(Intent.Download, "pobiera plik z sieci i zapisuje go na dysku");
+        if (httpObject && toDisk) Mark(Intent.Download, "downloads a file from the network and writes it to disk");
 
         bool shellExecuteCall = t.Contains(".shellexecute") && !t.Contains("useshellexecute");
         bool runsSomething = Any(t, "wscript.shell") && Any(t, ".run", ".exec(")
                           || shellExecuteCall
                           || Any(t, "cmd /c", "cmd.exe /c", "powershell -", "start-process");
-        if (runsSomething) Mark(Intent.Execute, "uruchamia zewnętrzny program lub polecenie");
+        if (runsSomething) Mark(Intent.Execute, "runs an external program or command");
 
         if (t.Contains("\"runas\"") || t.Contains("'runas'") || t.Contains(", \"runas\"")
             || (t.Contains("runas") && t.Contains("shellexecute")))
-            Mark(Intent.Elevate, "podnosi własne uprawnienia do administratora");
+            Mark(Intent.Elevate, "elevates itself to administrator");
 
         if (Any(t, "currentversion\\run", "currentversion/run", "\\runonce", "schtasks /create",
                    "\\start menu\\programs\\startup", "win.ini", "userinit"))
@@ -134,34 +134,34 @@ public static class ScriptHeuristics
 
         var tamperKeys = new (string Needle, string Opis)[]
         {
-            ("disabletaskmgr",              "blokada Menedżera zadań"),
+            ("disabletaskmgr",              "Task Manager blocked"),
             ("disableregistrytools",        "blokada Edytora rejestru"),
-            ("disablecmd",                  "blokada wiersza poleceń"),
-            ("enablelua",                   "wyłączenie kontroli konta użytkownika (UAC)"),
-            ("image file execution options","przejęcie uruchamiania programów (IFEO)"),
+            ("disablecmd",                  "command prompt blocked"),
+            ("enablelua",                   "User Account Control (UAC) turned off"),
+            ("image file execution options","program start-up hijack (IFEO)"),
             ("\\debugger",                  "podstawienie debuggera pod cudzy program"),
             ("safeboot",                    "ingerencja w tryb awaryjny"),
             ("legalnotice",                 "komunikat przed logowaniem"),
-            ("restrictrun",                 "ograniczenie listy dozwolonych programów"),
-            ("nodrives",                    "ukrycie dysków"),
-            ("noviewondrive",               "zablokowanie dostępu do dysków"),
-            ("nofolderoptions",             "ukrycie opcji folderów"),
-            ("hidefileext",                 "ukrycie rozszerzeń plików"),
+            ("restrictrun",                 "allowed program list restricted"),
+            ("nodrives",                    "drives hidden"),
+            ("noviewondrive",               "drive access blocked"),
+            ("nofolderoptions",             "folder options hidden"),
+            ("hidefileext",                 "file extensions hidden"),
             ("nocontrolpanel",              "blokada Panelu sterowania"),
             ("disablelockworkstation",      "blokada blokowania stacji"),
-            ("exefile\\shell\\open\\command","przejęcie uruchamiania plików .exe"),
-            ("taskkill /f /im explorer",    "wymuszone zamknięcie powłoki systemu"),
-            ("takeown /f",                  "przejęcie własności plików systemowych"),
-            ("icacls",                      "zmiana uprawnień do plików systemowych"),
-            ("assoc .lnk",                  "podmiana skojarzenia skrótów"),
-            ("windefend",                   "ingerencja w usługę Windows Defender"),
-            ("smartscreen",                 "wyłączanie SmartScreen"),
+            ("exefile\\shell\\open\\command",".exe start-up hijack"),
+            ("taskkill /f /im explorer",    "forced shutdown of the system shell"),
+            ("takeown /f",                  "ownership of system files taken over"),
+            ("icacls",                      "permissions on system files changed"),
+            ("assoc .lnk",                  "shortcut association replaced"),
+            ("windefend",                   "tampering with the Windows Defender service"),
+            ("smartscreen",                 "SmartScreen turned off"),
         };
         var tamperHits = new List<string>();
         foreach (var (needle, opis) in tamperKeys)
             if (t.Contains(needle)) tamperHits.Add(Loc.T(opis));
         if (tamperHits.Count >= 2)
-            Mark(Intent.Tamper, Loc.T("wyłącza zabezpieczenia systemu:") + " " + string.Join(", ", tamperHits.Take(5))
+            Mark(Intent.Tamper, Loc.T("turns system protections off:") + " " + string.Join(", ", tamperHits.Take(5))
                  + (tamperHits.Count > 5 ? $" (+{tamperHits.Count - 5})" : ""));
 
         bool readsSelf = Any(t, "wscript.scriptfullname", "scriptfullname", "wscript.scriptname")
@@ -169,18 +169,18 @@ public static class ScriptHeuristics
         bool writesScripts = Any(t, "createtextfile") && Any(t, ".vbs\"", ".vbs'", ".js\"", ".vbe\"", ".wsf\"")
                           || t.Contains("copyfile") && Any(t, ".vbs", ".js");
         if (readsSelf && writesScripts)
-            Mark(Intent.Replicate, "kopiuje własny kod do innych plików skryptowych (robak)");
+            Mark(Intent.Replicate, "copies its own code into other script files (worm)");
 
         bool infects = Any(t, "opentextfile") && t.Contains("readall")
                     && t.Contains("createtextfile")
                     && Any(t, ".doc", ".xls", ".ppt", ".pdf", ".jpg", ".zip", ".rar", ".dll", ".lnk");
-        if (infects) Mark(Intent.Infect, "dopisuje własny kod do istniejących plików użytkownika");
+        if (infects) Mark(Intent.Infect, "appends its own code to existing user files");
 
         if (Any(t, ".attributes = 2", ".attributes = 6", ".attributes=2", ".attributes=6",
                    ".attributes = 1", ".attributes=1", "attrib +h", "attrib +s"))
-            Mark(Intent.Hide, "ukrywa utworzone pliki lub foldery");
+            Mark(Intent.Hide, "hides the files or folders it creates");
         else if (Any(t, "-windowstyle hidden", "-w hidden", "-windowstyle 1"))
-            Mark(Intent.Hide, "uruchamia się bez widocznego okna");
+            Mark(Intent.Hide, "runs with no visible window");
 
         int chr = Count(t, "chr(");
         bool psZaciemnienie = Any(t, "-encodedcommand", " -enc ")
@@ -189,7 +189,7 @@ public static class ScriptHeuristics
         if (chr >= 20 || Any(t, "execute(", "eval(unescape", "fromcharcode", "document.write(unescape")
             || psZaciemnienie
             || LongestLine(raw) > 3000)
-            Mark(Intent.Obfuscate, "kod jest celowo zaciemniony");
+            Mark(Intent.Obfuscate, "the code is deliberately obfuscated");
 
         if (Any(t, ".subfolders") && Any(t, "drivetype", "getdrive", "drives"))
             Mark(Intent.Enumerate, "przechodzi rekurencyjnie po dyskach i folderach");
@@ -215,7 +215,7 @@ public static class ScriptHeuristics
 
         if (Has(Intent.Infect))
             return new Hit($"Virus.{family}.Infector", ScriptConfidence.High,
-                Loc.T("Skrypt infekuje istniejące pliki.") + " " + Why(Intent.Infect, Intent.Hide));
+                Loc.T("The script infects existing files.") + " " + Why(Intent.Infect, Intent.Hide));
 
         if (Has(Intent.Download, Intent.Execute))
         {
@@ -225,22 +225,22 @@ public static class ScriptHeuristics
                 || found.ContainsKey(Intent.Elevate);
             if (corroborated)
                 return new Hit($"Trojan.{family}.Downloader", ScriptConfidence.High,
-                    Loc.T("Skrypt pobiera i uruchamia plik z internetu.") + " "
+                    Loc.T("The script downloads and runs a file from the internet.") + " "
                     + Why(Intent.Download, Intent.Execute, Intent.Obfuscate, Intent.Hide, Intent.Elevate, Intent.Persist));
         }
 
         if (Has(Intent.Tamper) && (Has(Intent.Persist) || Has(Intent.Elevate) || Has(Intent.Execute)))
             return new Hit($"Trojan.{family}.Sabotage", ScriptConfidence.High,
-                Loc.T("Skrypt wyłącza zabezpieczenia systemu.") + " " + Why(Intent.Tamper, Intent.Persist, Intent.Elevate));
+                Loc.T("The script turns system protections off.") + " " + Why(Intent.Tamper, Intent.Persist, Intent.Elevate));
 
         if (found.Count >= 3)
             return new Hit($"Heur.{family}.Suspicious", ScriptConfidence.Medium,
-                Loc.T("Skrypt łączy kilka zachowań typowych dla złośliwego kodu:") + " "
+                Loc.T("The script combines several behaviours typical of malicious code:") + " "
                 + string.Join("; ", found.Values.Take(4)));
 
         if (Has(Intent.Obfuscate, Intent.Execute))
             return new Hit($"Heur.{family}.Obfuscated", ScriptConfidence.Medium,
-                "Zaciemniony skrypt uruchamiający polecenia. " + Why(Intent.Obfuscate, Intent.Execute));
+                "Obfuscated script that runs commands. " + Why(Intent.Obfuscate, Intent.Execute));
 
         return null;
     }

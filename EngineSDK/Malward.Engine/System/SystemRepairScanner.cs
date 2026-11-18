@@ -582,6 +582,9 @@ public sealed class SystemRepairScanner
         }
         if (p.Hkcu) Fix(Registry.CurrentUser);
         if (p.Hklm) Fix(Registry.LocalMachine);
+        if (p.Category == "ui") ShellStateRefresh.Apply(p.ValueName, p.SafeValue);
+        if (p.Hkcu && p.SafeValue.HasValue && ReadInt(Registry.CurrentUser, p.SubKey, p.ValueName) == p.BadValue)
+            return (false, $"{p.ValueName} is still {p.BadValue} after the repair");
         return (true, null);
     }
 
@@ -1181,5 +1184,61 @@ public sealed class SystemRepairScanner
         }
         catch { }
         return null;
+    }
+}
+
+internal static class ShellStateRefresh
+{
+    private const uint SSF_SHOWALLOBJECTS = 0x00000001;
+    private const uint SSF_SHOWEXTENSIONS = 0x00000002;
+    private const uint FlagShowAllObjects = 1u << 0;
+    private const uint FlagShowExtensions = 1u << 1;
+
+    private const int SHCNE_ASSOCCHANGED = 0x08000000;
+    private const uint SHCNF_IDLIST = 0x0000;
+    private const int HWND_BROADCAST = 0xFFFF;
+    private const uint WM_SETTINGCHANGE = 0x001A;
+    private const uint SMTO_ABORTIFHUNG = 0x0002;
+
+    [DllImport("shell32.dll")]
+    private static extern void SHGetSetSettings(byte[] state, uint mask, bool set);
+
+    [DllImport("shell32.dll")]
+    private static extern void SHChangeNotify(int eventId, uint flags, IntPtr item1, IntPtr item2);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, string lParam,
+                                                    uint flags, uint timeout, out UIntPtr result);
+
+    public static void Apply(string valueName, int? safeValue)
+    {
+        try
+        {
+            uint mask = 0, bit = 0;
+            bool on = false;
+            if (string.Equals(valueName, "HideFileExt", StringComparison.OrdinalIgnoreCase))
+            {
+                mask = SSF_SHOWEXTENSIONS; bit = FlagShowExtensions; on = safeValue == 0;
+            }
+            else if (string.Equals(valueName, "Hidden", StringComparison.OrdinalIgnoreCase))
+            {
+                mask = SSF_SHOWALLOBJECTS; bit = FlagShowAllObjects; on = safeValue == 1;
+            }
+
+            if (mask != 0)
+            {
+                var state = new byte[64];
+                SHGetSetSettings(state, mask, false);
+                uint flags = BitConverter.ToUInt32(state, 0);
+                flags = on ? flags | bit : flags & ~bit;
+                BitConverter.GetBytes(flags).CopyTo(state, 0);
+                SHGetSetSettings(state, mask, true);
+            }
+
+            SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
+            SendMessageTimeout((IntPtr)HWND_BROADCAST, WM_SETTINGCHANGE, UIntPtr.Zero, "ShellState",
+                               SMTO_ABORTIFHUNG, 2000, out _);
+        }
+        catch { }
     }
 }

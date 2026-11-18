@@ -30,6 +30,12 @@ public static class Masquerade
     private static readonly string[] SystemDirs =
         { @"\windows\system32\", @"\windows\syswow64\", @"\windows\winsxs\", @"\windows\servicing\" };
 
+    private static readonly string[] ServicingDirs =
+    {
+        @"\windows\softwaredistribution\", @"\windows\systemtemp\", @"\$winreagent\",
+        @"\$windows.~bt\", @"\$windows.~ws\",
+    };
+
     private static readonly HashSet<string> LureExts = new(StringComparer.OrdinalIgnoreCase)
     {
         ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".rtf", ".csv",
@@ -73,7 +79,8 @@ public static class Masquerade
             return new Hit(DetectionNames.ForFile(path),
                 $"Nazwa pliku lub folderu z końcową spacją/kropką (ukrywanie prawdziwej ścieżki): {path}");
 
-        if (ProtectedNames.Contains(name) && !InSystemDir(path))
+        if (ProtectedNames.Contains(name) && !InSystemDir(path) && !InServicingDir(path)
+            && IsRunnableImage(path))
         {
             if (verifySignature && SystemFileCheck.IsGenuineSystemFile(path)) return null;
             return new Hit(DetectionNames.ForFile(path),
@@ -196,6 +203,23 @@ public static class Masquerade
     {
         var p = path.ToLowerInvariant();
         return Array.Exists(SystemDirs, d => p.Contains(d));
+    }
+
+    private static bool InServicingDir(string path)
+    {
+        var p = path.ToLowerInvariant();
+        return Array.Exists(ServicingDirs, d => p.Contains(d));
+    }
+
+    private static bool IsRunnableImage(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            Span<byte> head = stackalloc byte[2];
+            return fs.Read(head) == 2 && head[0] == (byte)'M' && head[1] == (byte)'Z';
+        }
+        catch { return true; }
     }
 
     private static bool HasTrailingSpaceOrDotComponent(string path)

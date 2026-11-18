@@ -158,7 +158,7 @@ public sealed class ScanPipeline : IDisposable
 
         if (!_rescanMemo.TryGetValue(sha, out var verdict))
         {
-            if (realtime) return null;
+            if (realtime && !_settings.RealtimeCloudRescan) return null;
 
             long cap = (long)Math.Max(1, _settings.CloudRescanMaxMb) * 1024 * 1024;
             if (size > cap) return null;

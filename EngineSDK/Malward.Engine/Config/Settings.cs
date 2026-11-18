@@ -58,6 +58,9 @@ public sealed class Settings
     [JsonPropertyName("cloud_rescan_detections")]
     public bool CloudRescanDetections { get; set; } = true;
 
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool RealtimeCloudRescan { get; set; }
+
     [JsonPropertyName("cloud_rescan_max_mb")]
     public int CloudRescanMaxMb { get; set; } = 64;
 

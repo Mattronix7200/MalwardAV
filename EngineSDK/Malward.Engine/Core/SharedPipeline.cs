@@ -24,7 +24,7 @@ public static class SharedPipeline
             try
             {
                 _pipeline = new ScanPipeline(Config.Settings.Load());
-                if (_failures > 0) Log?.Invoke("Silnik", $"Silnik odbudowany po {_failures} nieudanych próbach.");
+                if (_failures > 0) Log?.Invoke("Engine", $"Engine rebuilt after {_failures} failed attempt(s).");
                 _failures = 0;
                 return _pipeline;
             }
@@ -33,8 +33,8 @@ public static class SharedPipeline
                 _failures++;
                 var wait = TimeSpan.FromSeconds(Math.Min(60, 5 * _failures));
                 _nextAttemptUtc = DateTime.UtcNow + wait;
-                Log?.Invoke("Silnik", $"Nie udało się uruchomić silnika w procesie " +
-                                      $"(próba {_failures}, ponowię za {wait.TotalSeconds:F0} s): {ex.Message}");
+                Log?.Invoke("Engine", $"In-process engine failed to start " +
+                                      $"(attempt {_failures}, retrying in {wait.TotalSeconds:F0} s): {ex.Message}");
                 return null;
             }
         }

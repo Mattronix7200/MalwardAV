@@ -15,6 +15,52 @@ public static class Paths
     public static string QuarantineDir => Path.Combine(AppDataDir, "quarantine");
 
     public static string WorkingDir => Path.Combine(AppDataDir, "engine", "working");
+
+    public static string NewWorkDir(string kind)
+    {
+        var root = WorkingDir;
+        try { Directory.CreateDirectory(root); }
+        catch { root = Path.GetTempPath(); }
+        var dir = Path.Combine(root, $"{kind}-{Environment.ProcessId}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    public static int SweepWorkingDir()
+    {
+        int removed = 0;
+        try
+        {
+            if (!Directory.Exists(WorkingDir)) return 0;
+            foreach (var dir in Directory.EnumerateDirectories(WorkingDir))
+            {
+                if (!IsOrphanedWorkDir(dir)) continue;
+                try { Directory.Delete(dir, true); removed++; }
+                catch { }
+            }
+        }
+        catch { }
+        return removed;
+    }
+
+    private static bool IsOrphanedWorkDir(string dir)
+    {
+        var parts = Path.GetFileName(dir).Split('-');
+        if (parts.Length >= 3 && int.TryParse(parts[1], out int pid))
+            return pid != Environment.ProcessId && !ProcessAlive(pid);
+        try { return DateTime.UtcNow - Directory.GetLastWriteTimeUtc(dir) > TimeSpan.FromHours(1); }
+        catch { return false; }
+    }
+
+    private static bool ProcessAlive(int pid)
+    {
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            return !p.HasExited;
+        }
+        catch { return false; }
+    }
     public static string BasesDir  => Path.Combine(ExeDir, "_bases");
 
     public static string SettingsFile  => Path.Combine(DataDir, "settings.json");

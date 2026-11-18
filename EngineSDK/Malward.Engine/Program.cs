@@ -22,11 +22,23 @@ internal static class Program
         bool buildHelper = args.Length > 0
             && (args[0].Equals("make-configkey", StringComparison.OrdinalIgnoreCase)
              || args[0].Equals("make-sigdata", StringComparison.OrdinalIgnoreCase));
+        if (!buildHelper && LaunchGuard.StartedFromShell(out var parent))
+        {
+            Console.Error.WriteLine(
+                "malscan.exe jest wewnetrznym modulem programu Malward i nie sluzy do recznego uruchamiania." +
+                Environment.NewLine +
+                "Do skanowania z wiersza polecen uzyj malcsm.exe." + Environment.NewLine +
+                "malscan.exe is an internal Malward component and cannot be started by hand " +
+                "(started from: " + parent + "). Use malcsm.exe for command-line scanning.");
+            return 9;
+        }
         if (!buildHelper) AdminCheck.RequireAdmin();
 
         if (args.Length == 0) return 1;
 
         var settings = Settings.Load();
+
+        if (!buildHelper) Paths.SweepWorkingDir();
 
         return args[0].ToLowerInvariant() switch
         {
@@ -1438,7 +1450,8 @@ internal static class Program
             using var cloud = new ServerClient(settings);
 
             Console.WriteLine("ANALYZE-PHASE:scanning");
-            var scan = cloud.ScanFileAsync(tmp, settings.ScanLevel).GetAwaiter().GetResult();
+            var scan = cloud.ScanFileAsync(tmp, settings.ScanLevel, null, default, null,
+                    unlimited: true, verifyDetection: true).GetAwaiter().GetResult();
 
             Console.WriteLine("ANALYZE-PHASE:done");
 
@@ -1501,7 +1514,7 @@ internal static class Program
 
             var scan = cloud.ScanFileAsync(path, settings.ScanLevel, vt, default,
                     (sent, total) => Console.WriteLine($"ANALYZE-PROGRESS:{sent}/{total}"),
-                    unlimited: true)
+                    unlimited: true, verifyDetection: true)
                 .GetAwaiter().GetResult();
             Console.WriteLine("ANALYZE-PHASE:done");
             if (!string.IsNullOrEmpty(scan.Label)) Console.WriteLine($"ANALYZE-LABEL:{scan.Label}");

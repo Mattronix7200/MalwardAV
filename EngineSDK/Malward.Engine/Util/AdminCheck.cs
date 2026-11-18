@@ -19,8 +19,8 @@ public static class AdminCheck
     {
         if (IsAdmin()) return;
         Console.Error.WriteLine(
-            "[!] Malward.Engine wymaga uprawnień administratora. " +
-            "Uruchom jako administrator (np. RunAs).");
+            "[!] Malward.Engine needs administrator rights. " +
+            "Start it elevated (for example with RunAs).");
         Environment.Exit(5);
     }
 }

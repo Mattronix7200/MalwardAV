@@ -42,7 +42,7 @@ public static class QbFormat
         byte ver = hdr[4];
         if (ver != VERSION)
             throw new InvalidDataException(
-                $"Unsupported QB version {ver} (expected {VERSION}). Plik z poprzedniej wersji silnika — usuń quarantine.QB i pliki .bin obok niego.");
+                $"Unsupported QB version {ver} (expected {VERSION}). Written by an older engine - delete quarantine.QB and the .bin files next to it.");
         uint entryCount = BitConverter.ToUInt32(hdr, 6);
         var salt = new byte[16];
         Buffer.BlockCopy(hdr, 10, salt, 0, 16);
